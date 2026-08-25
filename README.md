@@ -19,7 +19,7 @@ Ngôn ngữ: Tiếng Việt | [English](README.en.md)
 
 ## Tổng quan
 
-HaoHan Backpack là plugin Minecraft dành cho HaoHan SMP. Plugin cung cấp hệ thống ba lô cá nhân (BetterStorage) với giao diện GUI 54 ô (6 hàng), lưu trữ dữ liệu vật phẩm bền vững bằng SQLite theo UUID riêng biệt cho từng chiếc ba lô, bảo vệ vật phẩm khi chết và ngăn ngừa các lỗi nhân bản (dupe item) triệt để.
+HaoHan Backpack là plugin Minecraft dành cho HaoHan SMP. Plugin cung cấp hệ thống ba lô cá nhân tùy chỉnh (BetterStorage) với giao diện GUI 54 ô (6 hàng), lưu trữ dữ liệu vật phẩm bền vững bằng SQLite theo UUID riêng biệt cho từng chiếc ba lô, bảo vệ vật phẩm khi chết và ngăn ngừa các lỗi nhân bản (dupe item) triệt để.
 
 ## Công nghệ sử dụng
 
