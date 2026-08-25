@@ -34,6 +34,8 @@ import vn.haohan.backpack.gui.BackpackHolder;
 import vn.haohan.backpack.storage.SqliteStore;
 
 import java.io.File;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.lang.reflect.Method;
 import java.io.IOException;
 import java.io.ByteArrayInputStream;
@@ -42,9 +44,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public final class BackpackService {
-    /** The reserved socket is deliberately outside persisted backpack storage. */
-    public static final int[] MODULE_SLOTS = {47};
-    /** All usable storage slots in the six-row backpack (54 - module sockets). */
+    /**
+     * The reserved sockets (5 module slots) are deliberately outside persisted
+     * backpack storage.
+     */
+    public static final int[] MODULE_SLOTS = { 47, 48, 49, 50, 51 };
+    /**
+     * All usable storage slots in the six-row backpack (54 - module sockets = 49
+     * storage slots).
+     */
     public static final int[] STORAGE_SLOTS = java.util.stream.IntStream.range(0, 54)
             .filter(slot -> !containsStatic(MODULE_SLOTS, slot)).toArray();
     private final Plugin plugin;
@@ -62,204 +70,119 @@ public final class BackpackService {
     private final SqliteStore database;
 
     public BackpackService(Plugin plugin, NamespacedKey itemKey) {
-        this.plugin = plugin; this.itemKey = itemKey; this.backpackIdKey = new NamespacedKey(plugin, "backpack_id");
-        this.placedKey = new NamespacedKey(plugin, "placed_backpack"); this.placedIdKey = new NamespacedKey(plugin, "placed_backpack_id"); this.contentsKey = new NamespacedKey(plugin, "backpack_contents");
-        this.visualKey = new NamespacedKey(plugin, "backpack_visual"); this.visualIdKey = new NamespacedKey(plugin, "backpack_visual_id");
+        this.plugin = plugin;
+        this.itemKey = itemKey;
+        this.backpackIdKey = new NamespacedKey(plugin, "backpack_id");
+        this.placedKey = new NamespacedKey(plugin, "placed_backpack");
+        this.placedIdKey = new NamespacedKey(plugin, "placed_backpack_id");
+        this.contentsKey = new NamespacedKey(plugin, "backpack_contents");
+        this.visualKey = new NamespacedKey(plugin, "backpack_visual");
+        this.visualIdKey = new NamespacedKey(plugin, "backpack_visual_id");
         this.wornKey = new NamespacedKey(plugin, "worn_backpack");
         this.colorKey = new NamespacedKey(plugin, "backpack_color");
-        this.dataFolder = new File(plugin.getDataFolder(), "backpacks"); dataFolder.mkdirs();
+        this.dataFolder = new File(plugin.getDataFolder(), "backpacks");
+        dataFolder.mkdirs();
         SqliteStore store;
-        try { store = new SqliteStore(plugin.getDataFolder()); }
-        catch (Exception ex) { plugin.getLogger().severe("SQLite kon the khoi tao: " + ex.getMessage()); store = null; }
+        try {
+            store = new SqliteStore(plugin.getDataFolder());
+        } catch (Exception ex) {
+            plugin.getLogger().severe("SQLite kon the khoi tao: " + ex.getMessage());
+            store = null;
+        }
         this.database = store;
     }
 
     public void registerItemCoreDefinition() {
-        initDyedTexturesAndModels();
-        if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") == null) return;
+        if (!plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore"))
+            return;
         try {
-            var core = vn.haohan.itemcore.api.HaoHanItemCore.get();
-            if (!core.getItemService().exists("haohan:backpack")) {
-                core.getItemRegistry().register(vn.haohan.itemcore.api.item.ItemDefinition.builder("haohan:backpack")
-                        .material(Material.BROWN_DYE).displayName("Backpack").maxStackSize(1)
-                        .type(vn.haohan.itemcore.api.item.ItemType.SPECIAL).model("haohan:backpack")
-                        .addLore("&7Chuột phải để mở ba lô cá nhân.").addLore("&8Dung lượng: 53 ô + 1 module").build());
-            }
-
-            for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
-                String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
-                String id = "haohan:backpack_" + colorName;
-                if (!core.getItemService().exists(id)) {
-                    core.getItemRegistry().register(vn.haohan.itemcore.api.item.ItemDefinition.builder(id)
-                            .material(Material.BROWN_DYE).displayName("Backpack").maxStackSize(1)
-                            .type(vn.haohan.itemcore.api.item.ItemType.SPECIAL).model(id)
-                            .addLore("&7Chuột phải để mở ba lô cá nhân.").addLore("&8Dung lượng: 53 ô + 1 module").build());
-                }
-            }
+            vn.haohan.backpack.hook.ItemCoreHook.register();
         } catch (Throwable ex) {
-            if (plugin.getConfig().getBoolean("debug", false)) plugin.getLogger().info("ItemCore không khả dụng, dùng item fallback: " + ex.getClass().getSimpleName());
+            if (plugin.getConfig().getBoolean("debug", false))
+                plugin.getLogger().info("ItemCore hook lỗi: " + ex.getClass().getSimpleName());
         }
     }
 
     public void registerDyeRecipes() {
+        ItemStack templateBackpack = createTemplateBackpack();
         for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
             String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
             NamespacedKey key = new NamespacedKey(plugin, "dye_backpack_" + colorName);
             try {
                 plugin.getServer().removeRecipe(key);
-            } catch (Throwable ignored) { }
+            } catch (Throwable ignored) {
+            }
             try {
-                ItemStack dyedBackpack = createBackpackItem();
+                ItemStack dyedBackpack = createTemplateBackpack();
                 setBackpackColor(dyedBackpack, dye.getColor().asRGB());
 
                 Material dyeMat = Material.valueOf(dye.name() + "_DYE");
-                org.bukkit.inventory.ShapelessRecipe recipe = new org.bukkit.inventory.ShapelessRecipe(key, dyedBackpack);
+                org.bukkit.inventory.ShapelessRecipe recipe = new org.bukkit.inventory.ShapelessRecipe(key,
+                        dyedBackpack);
                 recipe.setGroup("haohan_backpack_dye");
                 recipe.setCategory(org.bukkit.inventory.recipe.CraftingBookCategory.EQUIPMENT);
-                recipe.addIngredient(Material.BROWN_DYE);
+                recipe.addIngredient(new org.bukkit.inventory.RecipeChoice.ExactChoice(templateBackpack));
                 recipe.addIngredient(dyeMat);
                 plugin.getServer().addRecipe(recipe);
-            } catch (Throwable ignored) { }
+            } catch (Throwable ignored) {
+            }
         }
     }
 
+    public ItemStack createTemplateBackpack() {
+        ItemStack item = new ItemStack(Material.BROWN_DYE);
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.displayName(component(plugin.getConfig().getString("backpack-item-name", "Backpack")));
+            meta.lore(List.of(component("&7Chuột phải để mở ba lô cá nhân."),
+                    component("&8Dung lượng: 53 ô + 1 module")));
+            applyBackpackMeta(meta);
+            meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
+            item.setItemMeta(meta);
+        }
+        return item;
+    }
+
     public void discoverRecipes(Player player) {
-        if (player == null || !player.isOnline()) return;
+        if (player == null || !player.isOnline())
+            return;
         List<NamespacedKey> keys = new ArrayList<>();
         for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
             keys.add(new NamespacedKey(plugin, "dye_backpack_" + dye.name().toLowerCase(java.util.Locale.ROOT)));
         }
         try {
             player.discoverRecipes(keys);
-        } catch (Throwable ignored) { }
-    }
-
-    public void initDyedTexturesAndModels() {
-        java.awt.image.BufferedImage baseImage = null;
-        try (var in = plugin.getResource("backpack.png")) {
-            if (in != null) {
-                baseImage = javax.imageio.ImageIO.read(in);
-            }
-        } catch (Throwable ignored) { }
-
-        if (baseImage == null) {
-            File localImg = new File(plugin.getDataFolder(), "backpack.png");
-            if (localImg.exists()) {
-                try { baseImage = javax.imageio.ImageIO.read(localImg); } catch (Throwable ignored) { }
-            }
+        } catch (Throwable ignored) {
         }
-
-        if (baseImage == null) {
-            File rpImg = new File("F:/.HaoHanProject/HaoHan-Resourcepack/assets/haohan/textures/block/backpack.png");
-            if (rpImg.exists()) {
-                try { baseImage = javax.imageio.ImageIO.read(rpImg); } catch (Throwable ignored) { }
-            }
-        }
-
-        if (baseImage == null) return;
-
-        // Register in ItemCore if available
-        if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") != null) {
-            try {
-                var core = vn.haohan.itemcore.api.HaoHanItemCore.get();
-                var registry = core.getIconTextureRegistry();
-                if (registry.get("haohan:backpack").isEmpty()) {
-                    registry.register("haohan:backpack", new vn.haohan.itemcore.api.texture.IconTexture("haohan:backpack", baseImage));
-                }
-                for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
-                    String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
-                    String id = "haohan:backpack_" + colorName;
-                    if (registry.get(id).isEmpty()) {
-                        java.awt.image.BufferedImage shifted = shiftHueImage(baseImage, dye.getColor().asRGB());
-                        if (shifted != null) {
-                            registry.register(id, new vn.haohan.itemcore.api.texture.IconTexture(id, shifted));
-                        }
-                    }
-                }
-            } catch (Throwable ignored) { }
-        }
-
-        // Export to Resourcepack workspace directory if present
-        try {
-            File rpDir = new File("F:/.HaoHanProject/HaoHan-Resourcepack");
-            if (rpDir.exists() && rpDir.isDirectory()) {
-                File texturesDir = new File(rpDir, "assets/haohan/textures/block");
-                File modelsDir = new File(rpDir, "assets/haohan/models/item");
-                File itemsDir = new File(rpDir, "assets/haohan/items");
-                File blockModelsDir = new File(rpDir, "assets/haohan/models/block");
-                texturesDir.mkdirs(); modelsDir.mkdirs(); itemsDir.mkdirs(); blockModelsDir.mkdirs();
-
-                File baseModelFile = new File(modelsDir, "backpack.json");
-                String baseModelContent = baseModelFile.exists() ? java.nio.file.Files.readString(baseModelFile.toPath()) : null;
-
-                File normalMap = new File(texturesDir, "backpack_n.png");
-                File specularMap = new File(texturesDir, "backpack_s.png");
-
-                for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
-                    String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
-                    File texFile = new File(texturesDir, "backpack_" + colorName + ".png");
-                    if (!texFile.exists()) {
-                        java.awt.image.BufferedImage shifted = shiftHueImage(baseImage, dye.getColor().asRGB());
-                        if (shifted != null) {
-                            javax.imageio.ImageIO.write(shifted, "PNG", texFile);
-                        }
-                    }
-
-                    if (normalMap.exists()) {
-                        File normOut = new File(texturesDir, "backpack_" + colorName + "_n.png");
-                        if (!normOut.exists()) java.nio.file.Files.copy(normalMap.toPath(), normOut.toPath());
-                    }
-                    if (specularMap.exists()) {
-                        File specOut = new File(texturesDir, "backpack_" + colorName + "_s.png");
-                        if (!specOut.exists()) java.nio.file.Files.copy(specularMap.toPath(), specOut.toPath());
-                    }
-
-                    File modelFile = new File(modelsDir, "backpack_" + colorName + ".json");
-                    if (!modelFile.exists() && baseModelContent != null) {
-                        String json = baseModelContent.replace("\"haohan:block/backpack\"", "\"haohan:block/backpack_" + colorName + "\"");
-                        java.nio.file.Files.writeString(modelFile.toPath(), json);
-                    }
-
-                    File itemFile = new File(itemsDir, "backpack_" + colorName + ".json");
-                    if (!itemFile.exists()) {
-                        String json = "{\n  \"model\": {\n    \"type\": \"minecraft:model\",\n    \"model\": \"haohan:item/backpack_" + colorName + "\"\n  }\n}";
-                        java.nio.file.Files.writeString(itemFile.toPath(), json);
-                    }
-
-                    File blockModelFile = new File(blockModelsDir, "backpack_" + colorName + ".json");
-                    if (!blockModelFile.exists()) {
-                        String json = "{\n  \"parent\": \"haohan:item/backpack_" + colorName + "\"\n}";
-                        java.nio.file.Files.writeString(blockModelFile.toPath(), json);
-                    }
-                }
-            }
-        } catch (Throwable ignored) { }
     }
 
     public ItemStack createBackpackItem() {
         try {
-            if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") != null) {
-                var service = vn.haohan.itemcore.api.HaoHanItemCore.get().getItemService();
-                if (service.exists("haohan:backpack")) {
-                    ItemStack item = service.create("haohan:backpack");
+            if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+                ItemStack item = vn.haohan.backpack.hook.ItemCoreHook.createItem("haohan:backpack");
+                if (item != null) {
                     item.setType(Material.BROWN_DYE);
                     ItemMeta meta = item.getItemMeta();
                     if (meta != null) {
                         applyBackpackMeta(meta);
-                        meta.getPersistentDataContainer().set(backpackIdKey, PersistentDataType.STRING, UUID.randomUUID().toString());
+                        meta.getPersistentDataContainer().set(backpackIdKey, PersistentDataType.STRING,
+                                UUID.randomUUID().toString());
                         item.setItemMeta(meta);
                     }
                     return item;
                 }
             }
-        } catch (Throwable ignored) { }
-        ItemStack item = new ItemStack(Material.BROWN_DYE); ItemMeta meta = item.getItemMeta();
+        } catch (Throwable ignored) {
+        }
+        ItemStack item = new ItemStack(Material.BROWN_DYE);
+        ItemMeta meta = item.getItemMeta();
         meta.displayName(component(plugin.getConfig().getString("backpack-item-name", "Backpack")));
         meta.lore(List.of(component("&7Chuột phải để mở ba lô cá nhân."), component("&8Dung lượng: 53 ô + 1 module")));
         applyBackpackMeta(meta);
         meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
         meta.getPersistentDataContainer().set(backpackIdKey, PersistentDataType.STRING, UUID.randomUUID().toString());
-        item.setItemMeta(meta); return item;
+        item.setItemMeta(meta);
+        return item;
     }
 
     /**
@@ -285,29 +208,42 @@ public final class BackpackService {
                 ItemFlag.HIDE_ARMOR_TRIM,
                 ItemFlag.HIDE_STORED_ENCHANTS,
                 ItemFlag.HIDE_ENCHANTS,
-                ItemFlag.HIDE_DYE
-        );
+                ItemFlag.HIDE_DYE);
     }
 
     public boolean isBackpack(ItemStack item) {
-        if (item == null || item.getType().isAir()) return false;
-        try { if (vn.haohan.itemcore.api.HaoHanItemCore.get().getItemService().isItem(item, "haohan:backpack")) return true; } catch (Throwable ignored) { }
-        if (item.getItemMeta() == null) return false;
+        if (item == null || item.getType().isAir())
+            return false;
+        try {
+            if (vn.haohan.itemcore.api.HaoHanItemCore.get().getItemService().isItem(item, "haohan:backpack"))
+                return true;
+        } catch (Throwable ignored) {
+        }
+        if (item.getItemMeta() == null)
+            return false;
         return item.getItemMeta().getPersistentDataContainer().has(itemKey, PersistentDataType.BYTE)
                 || item.getItemMeta().getPersistentDataContainer().has(backpackIdKey, PersistentDataType.STRING);
     }
 
     public UUID backpackId(ItemStack item) {
-        if (!isBackpack(item) || item.getItemMeta() == null) return null;
+        if (!isBackpack(item) || item.getItemMeta() == null)
+            return null;
         String value = item.getItemMeta().getPersistentDataContainer().get(backpackIdKey, PersistentDataType.STRING);
-        if (value == null) return null;
-        try { return UUID.fromString(value); } catch (IllegalArgumentException ignored) { return null; }
+        if (value == null)
+            return null;
+        try {
+            return UUID.fromString(value);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     public boolean isBlocked(ItemStack item) {
-        if (item == null) return false;
+        if (item == null)
+            return false;
         for (String material : plugin.getConfig().getStringList("blocked-materials"))
-            if (item.getType().name().equalsIgnoreCase(material)) return true;
+            if (item.getType().name().equalsIgnoreCase(material))
+                return true;
         return false;
     }
 
@@ -316,28 +252,56 @@ public final class BackpackService {
     }
 
     public boolean canReceiveBackpacks(Player player, int amount) {
-        if (!plugin.getConfig().getBoolean("backpack-limit.enabled", false)) return true;
+        if (!plugin.getConfig().getBoolean("backpack-limit.enabled", false))
+            return true;
         int limit = Math.max(0, plugin.getConfig().getInt("backpack-limit.default", 1));
         int count = 0;
-        for (ItemStack item : player.getInventory().getContents()) if (isBackpack(item)) count += item.getAmount();
+        for (ItemStack item : player.getInventory().getContents())
+            if (isBackpack(item))
+                count += item.getAmount();
         return count + amount <= limit;
     }
 
-    public boolean keepBackpacksAfterDeath() { return plugin.getConfig().getBoolean("keep-backpacks-after-death", true); }
-    public boolean blockBackpackInContainers() { return plugin.getConfig().getBoolean("block-backpack-in-containers", true); }
-    public boolean allowBackpacksInsideBackpacks() { return plugin.getConfig().getBoolean("allow-backpacks-inside-backpacks", false); }
-    public boolean hopperEnabled() { return plugin.getConfig().getBoolean("hopper.enabled", true); }
-    public boolean backpackCollisionEnabled() { return plugin.getConfig().getBoolean("backpack-collision.enabled", true); }
-
-    public SqliteStore database() { return database; }
-
-    public List<UUID> listBackpacks(UUID owner) { return database == null ? List.of() : database.listByOwner(owner); }
-
-    public void closeDatabase() {
-        if (database != null) try { database.close(); } catch (Exception ex) { plugin.getLogger().warning("Không đóng được SQLite: " + ex.getMessage()); }
+    public boolean keepBackpacksAfterDeath() {
+        return plugin.getConfig().getBoolean("keep-backpacks-after-death", true);
     }
 
-    public void reload() { plugin.reloadConfig(); }
+    public boolean blockBackpackInContainers() {
+        return plugin.getConfig().getBoolean("block-backpack-in-containers", true);
+    }
+
+    public boolean allowBackpacksInsideBackpacks() {
+        return plugin.getConfig().getBoolean("allow-backpacks-inside-backpacks", false);
+    }
+
+    public boolean hopperEnabled() {
+        return plugin.getConfig().getBoolean("hopper.enabled", true);
+    }
+
+    public boolean backpackCollisionEnabled() {
+        return plugin.getConfig().getBoolean("backpack-collision.enabled", true);
+    }
+
+    public SqliteStore database() {
+        return database;
+    }
+
+    public List<UUID> listBackpacks(UUID owner) {
+        return database == null ? List.of() : database.listByOwner(owner);
+    }
+
+    public void closeDatabase() {
+        if (database != null)
+            try {
+                database.close();
+            } catch (Exception ex) {
+                plugin.getLogger().warning("Không đóng được SQLite: " + ex.getMessage());
+            }
+    }
+
+    public void reload() {
+        plugin.reloadConfig();
+    }
 
     public Inventory open(Player player) {
         ItemStack chest = player.getInventory().getChestplate();
@@ -351,7 +315,8 @@ public final class BackpackService {
         UUID id = backpackId(item);
         if (id == null) {
             ItemMeta meta = item.getItemMeta();
-            if (meta == null) return open(player);
+            if (meta == null)
+                return open(player);
             id = UUID.randomUUID();
             meta.getPersistentDataContainer().set(backpackIdKey, PersistentDataType.STRING, id.toString());
             item.setItemMeta(meta);
@@ -364,9 +329,14 @@ public final class BackpackService {
         Block block = location.getBlock();
         if (block.getState() instanceof TileState state) {
             String id = state.getPersistentDataContainer().get(placedIdKey, PersistentDataType.STRING);
-            if (id != null) try { return open(player, UUID.fromString(id), id, null, state, null); } catch (IllegalArgumentException ignored) { }
+            if (id != null)
+                try {
+                    return open(player, UUID.fromString(id), id, null, state, null);
+                } catch (IllegalArgumentException ignored) {
+                }
         }
-        return open(player, UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)), key, null, block.getState() instanceof TileState state ? state : null, null);
+        return open(player, UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)), key, null,
+                block.getState() instanceof TileState state ? state : null, null);
     }
 
     public Inventory openAt(Player player, Entity visual) {
@@ -375,10 +345,16 @@ public final class BackpackService {
         UUID id = item != null ? backpackId(item) : visualStorageId(visual);
         if (id == null) {
             String value = visual.getPersistentDataContainer().get(placedIdKey, PersistentDataType.STRING);
-            if (value != null) try { id = UUID.fromString(value); } catch (IllegalArgumentException ignored) { }
+            if (value != null)
+                try {
+                    id = UUID.fromString(value);
+                } catch (IllegalArgumentException ignored) {
+                }
         }
-        if (id == null) id = UUID.randomUUID();
-        if (item == null) item = createBackpackItem(id);
+        if (id == null)
+            id = UUID.randomUUID();
+        if (item == null)
+            item = createBackpackItem(id);
 
         return open(player, id, id.toString(), item, null, display);
     }
@@ -387,7 +363,8 @@ public final class BackpackService {
         return open(player, storage, storageId, null, null, null);
     }
 
-    private Inventory open(Player player, UUID storage, String storageId, ItemStack sourceItem, TileState sourceBlock, ItemDisplay sourceDisplay) {
+    private Inventory open(Player player, UUID storage, String storageId, ItemStack sourceItem, TileState sourceBlock,
+            ItemDisplay sourceDisplay) {
         cleanupStaleLocks();
         if (open.containsKey(storage)) {
             player.sendMessage("§cBa lô này đang được mở bởi người khác.");
@@ -395,21 +372,29 @@ public final class BackpackService {
         }
         BackpackHolder holder = new BackpackHolder(storageId, STORAGE_SLOTS, sourceItem, sourceBlock, sourceDisplay);
         Inventory inventory = plugin.getServer().createInventory(holder, 54, guiTitle(player));
+        inventory.setMaxStackSize(512);
         holder.inventory(inventory);
         if (sourceItem != null) {
             loadContainer(sourceItem, inventory);
             // One-time migration for items created by the previous SQLite-backed version.
-            if (!hasContainerContents(sourceItem) && database != null && database.exists(storage)) load(storage, inventory);
-        } else if (sourceBlock != null) loadContainer(sourceBlock, inventory); else load(storage, inventory);
+            if (!hasContainerContents(sourceItem) && database != null && database.exists(storage))
+                load(storage, inventory);
+        } else if (sourceBlock != null)
+            loadContainer(sourceBlock, inventory);
+        else
+            load(storage, inventory);
         decorate(inventory);
-        open.put(storage, inventory); player.openInventory(inventory);
+        open.put(storage, inventory);
+        player.openInventory(inventory);
         player.playSound(player.getLocation(), "haohan:backpack.open", 1.0f, 1.0f);
         return inventory;
     }
 
     private Component guiTitle(Player player) {
-        String fallback = plugin.getConfig().getString("title", "&8Ba lô của %player%").replace("%player%", player.getName());
-        if (!plugin.getConfig().getBoolean("custom-gui.enabled", true)) return component(fallback);
+        String fallback = plugin.getConfig().getString("title", "&8Ba lô của %player%").replace("%player%",
+                player.getName());
+        if (!plugin.getConfig().getBoolean("custom-gui.enabled", true))
+            return component(fallback);
 
         String font = plugin.getConfig().getString("custom-gui.font", "haohan:gui");
         String prefix = plugin.getConfig().getString("custom-gui.prefix", "\uE100");
@@ -420,22 +405,165 @@ public final class BackpackService {
                 .color(NamedTextColor.WHITE);
     }
 
-    /** The custom bitmap GUI supplies the background; module sockets are real locked items. */
+    /**
+     * The custom bitmap GUI supplies the background; module sockets are real locked
+     * items.
+     */
+    /**
+     * The custom bitmap GUI supplies the background; module sockets are real locked
+     * items.
+     */
     private void decorate(Inventory inventory) {
-        ItemStack socket = new ItemStack(Material.WHITE_STAINED_GLASS_PANE);
+        ItemStack socket = createModuleSocketItem();
+        for (int slot : MODULE_SLOTS) {
+            ItemStack current = inventory.getItem(slot);
+            if (current == null || current.getType().isAir()) {
+                inventory.setItem(slot, socket.clone());
+            }
+        }
+        applyCustomStackLimits(inventory);
+    }
+
+    public ItemStack createModuleSocketItem() {
+        ItemStack socket = new ItemStack(Material.PAPER);
         ItemMeta meta = socket.getItemMeta();
         if (meta != null) {
-            meta.displayName(component("&eEmpty Module Slot"));
+            meta.displayName(component("&eÔ Cắm Module"));
             meta.lore(List.of(
-                    component("&7This is an empty module socket."),
-                    component("&7Place a module here to activate"),
-                    component("&7special backpack abilities.")));
+                    component("&7Đây là ô cắm module trống."),
+                    component("&7Đặt &fUpgrade Module &7vào đây"),
+                    component("&7để tăng giới hạn stack của ba lô.")));
+            meta.setItemModel(NamespacedKey.fromString("haohan:empty_module_slot"));
             socket.setItemMeta(meta);
         }
-        for (int slot : MODULE_SLOTS) inventory.setItem(slot, socket.clone());
+        return socket;
     }
+
+    public boolean isEmptyModuleSocket(ItemStack item) {
+        if (item == null || item.getType().isAir())
+            return false;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null || !meta.hasDisplayName())
+            return false;
+        String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                .serialize(meta.displayName());
+        return name.contains("Ô Cắm Module") || name.contains("Empty Module Slot");
+    }
+
+    public boolean isModule(ItemStack item) {
+        if (item == null || item.getType().isAir() || isEmptyModuleSocket(item))
+            return false;
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
+                if (id != null && (id.startsWith("haohan:upgrade_tier_") || id.equals("haohan:storage_module")))
+                    return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
+    }
+
+    public int getModuleStackCapacity(ItemStack moduleItem) {
+        if (moduleItem == null || moduleItem.getType().isAir() || !isModule(moduleItem))
+            return 64;
+        String id = null;
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(moduleItem);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (id == null)
+            return 64;
+
+        return switch (id) {
+            case "haohan:upgrade_tier_0" -> 128;
+            case "haohan:upgrade_tier_1" -> 192;
+            case "haohan:upgrade_tier_2" -> 320;
+            case "haohan:upgrade_tier_3" -> 448;
+            case "haohan:upgrade_tier_4" -> 512;
+            default -> 64;
+        };
+    }
+
+    public int getMaxStackCapacity(Inventory inventory) {
+        if (inventory == null)
+            return 64;
+        int highestCap = 64;
+        for (int slot : MODULE_SLOTS) {
+            ItemStack module = inventory.getItem(slot);
+            if (module != null && isModule(module)) {
+                int cap = getModuleStackCapacity(module);
+                if (cap > highestCap) {
+                    highestCap = cap; // Prioritize highest tier without stacking
+                }
+            }
+        }
+        return highestCap;
+    }
+
+    public void applyCustomStackSize(ItemStack item, int maxCap) {
+        if (item == null || item.getType().isAir()) return;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return;
+        if (maxCap > 64) {
+            try {
+                meta.setMaxStackSize(99);
+            } catch (Throwable ignored) {}
+        } else {
+            if (meta.hasMaxStackSize()) meta.setMaxStackSize(null);
+        }
+        item.setItemMeta(meta);
+    }
+
+    public void cleanCustomStackSize(ItemStack item) {
+        if (item == null || item.getType().isAir()) return;
+        if (item.hasItemMeta()) {
+            ItemMeta meta = item.getItemMeta();
+            if (meta != null) {
+                if (meta.hasMaxStackSize()) {
+                    meta.setMaxStackSize(null);
+                    item.setItemMeta(meta);
+                }
+            }
+        }
+    }
+
+    public boolean isSimilarIgnoringCustomStack(ItemStack a, ItemStack b) {
+        if (a == null || b == null) return false;
+        if (a.getType() != b.getType()) return false;
+        ItemStack aClone = a.clone();
+        cleanCustomStackSize(aClone);
+        ItemStack bClone = b.clone();
+        cleanCustomStackSize(bClone);
+        return aClone.isSimilar(bClone);
+    }
+
+    public void applyCustomStackLimits(Inventory inventory) {
+        if (inventory == null) return;
+        int maxCap = getMaxStackCapacity(inventory);
+        inventory.setMaxStackSize(maxCap);
+        for (int slot : STORAGE_SLOTS) {
+            ItemStack item = inventory.getItem(slot);
+            if (item != null && !item.getType().isAir()) {
+                applyCustomStackSize(item, maxCap);
+            }
+        }
+    }
+
+    public boolean isModuleSlot(int slot) {
+        return containsStatic(MODULE_SLOTS, slot);
+    }
+
     private boolean contains(int[] a, int value) { for (int i : a) if (i == value) return true; return false; }
-    private static boolean containsStatic(int[] a, int value) { for (int slot : a) if (slot == value) return true; return false; }
+
+    private static boolean containsStatic(int[] a, int value) {
+        for (int slot : a)
+            if (slot == value)
+                return true;
+        return false;
+    }
 
     public void close(Player player, Inventory inventory) {
         if (!(inventory.getHolder() instanceof BackpackHolder holder)) return;
@@ -443,11 +571,13 @@ public final class BackpackService {
         // InventoryCloseEvent and PlayerQuitEvent can both be fired for the
         // same view. Only the current lock owner may release it; an old close
         // event must never remove a newer player's lock.
-        if (open.get(storage) != inventory) return;
+        if (open.get(storage) != inventory)
+            return;
         saveOpenInventory(player == null ? null : player.getUniqueId(), storage, holder, inventory);
         open.remove(storage, inventory);
         player.playSound(player.getLocation(), "haohan:backpack.close", 1.0f, 1.0f);
     }
+
     private void saveOpenInventory(UUID owner, UUID storage, BackpackHolder holder, Inventory inventory) {
         if (holder.sourceItem() != null) {
             saveContainer(holder.sourceItem(), inventory);
@@ -464,7 +594,8 @@ public final class BackpackService {
 
     /**
      * A quit/kick or another plugin can leave an inventory in the lock map
-     * without delivering a usable close event. An inventory with no viewers
+     * without delivering a usable close event. An
+     * inventory with no viewers
      * is no longer open, so release and persist that lock before the next
      * player tries to open it.
      */
@@ -473,47 +604,68 @@ public final class BackpackService {
         while (iterator.hasNext()) {
             Map.Entry<UUID, Inventory> entry = iterator.next();
             Inventory inventory = entry.getValue();
-            if (!inventory.getViewers().isEmpty()) continue;
+            if (!inventory.getViewers().isEmpty())
+                continue;
             if (inventory.getHolder() instanceof BackpackHolder holder) {
                 saveOpenInventory(null, entry.getKey(), holder, inventory);
             }
-            iterator.remove();
+
         }
     }
 
     public void saveAllOpenBackpacks() {
         open.forEach((id, inventory) -> {
-            if (inventory.getHolder() instanceof BackpackHolder holder) saveOpenInventory(null, id, holder, inventory);
+            if (inventory.getHolder() instanceof BackpackHolder holder)
+                saveOpenInventory(null, id, holder, inventory);
         });
         open.clear();
     }
+
     private void load(UUID uuid, Inventory inventory) {
+        inventory.setMaxStackSize(512);
         List<ItemStack> databaseItems = database == null ? List.of() : database.load(uuid);
         if (database != null && database.exists(uuid)) {
             loadItems(databaseItems, inventory);
             return;
         }
-        File file = file(uuid); if (!file.exists()) return;
+        File file = file(uuid);
+        if (!file.exists()) return;
         List<?> items = YamlConfiguration.loadConfiguration(file).getList("items", List.of());
         loadItems(items, inventory);
     }
+
     private void loadItems(List<?> items, Inventory inventory) {
-        // Older versions persisted all 54 physical slots. Keep those backpacks
-        // readable after reserving slot 47 for the module socket.
+        inventory.setMaxStackSize(512);
         if (items.size() >= 54) {
             for (int physical = 0; physical < 54; physical++) {
-                if (!(items.get(physical) instanceof ItemStack stack)) continue;
+                Object obj = items.get(physical);
+                ItemStack stack = obj instanceof ItemStack s ? s : null;
                 if (containsStatic(MODULE_SLOTS, physical)) {
-                    putInFirstStorageSlot(stack, inventory);
+                    if (stack != null && !stack.getType().isAir() && isModule(stack)) {
+                        inventory.setItem(physical, stack);
+                    } else {
+                        inventory.setItem(physical, createModuleSocketItem());
+                    }
                 } else {
                     inventory.setItem(physical, stack);
                 }
             }
+            int cap = getMaxStackCapacity(inventory);
+            inventory.setMaxStackSize(cap);
             return;
         }
         for (int i = 0; i < STORAGE_SLOTS.length && i < items.size(); i++)
             if (items.get(i) instanceof ItemStack stack) inventory.setItem(STORAGE_SLOTS[i], stack);
+        for (int slot : MODULE_SLOTS) {
+            if (inventory.getItem(slot) == null || inventory.getItem(slot).getType().isAir()) {
+                inventory.setItem(slot, createModuleSocketItem());
+            }
+        }
+        int cap = getMaxStackCapacity(inventory);
+        inventory.setMaxStackSize(cap);
+
     }
+
     private void putInFirstStorageSlot(ItemStack stack, Inventory inventory) {
         for (int slot : STORAGE_SLOTS) {
             if (inventory.getItem(slot) == null || inventory.getItem(slot).getType().isAir()) {
@@ -522,17 +674,34 @@ public final class BackpackService {
             }
         }
     }
+
     private void save(UUID owner, UUID uuid, Inventory inventory) {
-        YamlConfiguration yaml = new YamlConfiguration(); List<ItemStack> items = new ArrayList<>();
-        for (int slot : STORAGE_SLOTS) items.add(inventory.getItem(slot)); yaml.set("items", items);
+        YamlConfiguration yaml = new YamlConfiguration();
+        List<ItemStack> items = new ArrayList<>();
+        for (int physical = 0; physical < 54; physical++) {
+            ItemStack item = inventory.getItem(physical);
+            if (containsStatic(MODULE_SLOTS, physical) && isEmptyModuleSocket(item)) {
+                items.add(null);
+            } else if (item != null && !item.getType().isAir()) {
+                ItemStack safe = item.clone();
+                if (safe.getAmount() > 99) safe.setAmount(99);
+                items.add(safe);
+            } else {
+                items.add(null);
+            }
+        }
+        yaml.set("items", items);
         if (database != null) database.save(uuid, owner, inventory, STORAGE_SLOTS);
         // Retain the legacy YAML as a migration/back-up format.
         try { yaml.save(file(uuid)); } catch (IOException ex) { plugin.getLogger().warning("Không lưu được ba lô " + uuid + ": " + ex.getMessage()); }
     }
+
     private File file(UUID uuid) { return new File(dataFolder, uuid + ".yml"); }
+
     public boolean isPlacedBackpack(Block block) {
         return block.getState() instanceof TileState state && state.getPersistentDataContainer().has(placedKey, PersistentDataType.BYTE);
     }
+
     public void markPlacedBackpack(Block block) {
         if (!(block.getState() instanceof TileState state)) return;
         state.getPersistentDataContainer().set(placedKey, PersistentDataType.BYTE, (byte) 1); state.update(true, false);
@@ -773,10 +942,8 @@ public final class BackpackService {
 
     private void loadSerialized(byte[] bytes, Inventory inventory) {
         if (bytes == null) return;
-        try (BukkitObjectInputStream in = new BukkitObjectInputStream(new ByteArrayInputStream(bytes))) {
-            Object value = in.readObject();
-            if (value instanceof List<?> items) loadItems(items, inventory);
-        } catch (IOException | ClassNotFoundException ex) { plugin.getLogger().warning("Không đọc được contents backpack: " + ex.getMessage()); }
+        List<ItemStack> items = deserializeToItems(bytes);
+        if (!items.isEmpty()) loadItems(items, inventory);
     }
 
     private void saveContainer(ItemStack item, Inventory inventory) {
@@ -785,92 +952,6 @@ public final class BackpackService {
         meta.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, serializeInventory(inventory));
         updateBackpackLore(meta, inventory);
         item.setItemMeta(meta);
-        applyContainerComponent(item, inventory);
-    }
-
-    public void applyContainerComponent(ItemStack item, Inventory inventory) {
-        if (item == null || item.getType().isAir() || inventory == null) return;
-        try {
-            Class<?> craftItemStackClass = Class.forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
-            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
-            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy", Class.forName("net.minecraft.world.item.ItemStack"));
-
-            Object nmsStack = asNMSCopy.invoke(null, item);
-            if (nmsStack == null) return;
-
-            List<Object> nmsItems = new ArrayList<>();
-            for (int slot : STORAGE_SLOTS) {
-                ItemStack stack = inventory.getItem(slot);
-                if (stack != null && !stack.getType().isAir()) {
-                    Object nmsSubItem = asNMSCopy.invoke(null, stack);
-                    if (nmsSubItem != null) nmsItems.add(nmsSubItem);
-                }
-            }
-
-            Class<?> itemContainerContentsClass = Class.forName("net.minecraft.world.item.component.ItemContainerContents");
-            Method fromItemsMethod = itemContainerContentsClass.getMethod("fromItems", List.class);
-            Object containerContents = fromItemsMethod.invoke(null, nmsItems);
-
-            Class<?> dataComponentsClass = Class.forName("net.minecraft.core.component.DataComponents");
-            Object containerComponentKey = dataComponentsClass.getField("CONTAINER").get(null);
-
-            Method setMethod = nmsStack.getClass().getMethod("set", Class.forName("net.minecraft.core.component.DataComponentType"), Object.class);
-            setMethod.invoke(nmsStack, containerComponentKey, containerContents);
-
-            ItemStack result = (ItemStack) asBukkitCopy.invoke(null, nmsStack);
-            if (result != null && result.hasItemMeta()) {
-                item.setItemMeta(result.getItemMeta());
-            }
-        } catch (Throwable ignored) {
-            // NMS reflection failsafe
-        }
-    }
-
-    /**
-     * Shifts the hue and tints a BufferedImage based on a target RGB color.
-     * This creates dyed variants dynamically from a single base texture without redrawing.
-     */
-    public static java.awt.image.BufferedImage shiftHueImage(java.awt.image.BufferedImage source, int targetRgb) {
-        if (source == null) return null;
-        int width = source.getWidth();
-        int height = source.getHeight();
-        java.awt.image.BufferedImage result = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-
-        float[] targetHsb = java.awt.Color.RGBtoHSB((targetRgb >> 16) & 0xFF, (targetRgb >> 8) & 0xFF, targetRgb & 0xFF, null);
-        float targetHue = targetHsb[0];
-        float targetSat = targetHsb[1];
-        float targetBri = targetHsb[2];
-
-        float[] pixelHsb = new float[3];
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int argb = source.getRGB(x, y);
-                int alpha = (argb >>> 24) & 0xFF;
-                if (alpha == 0) {
-                    result.setRGB(x, y, argb);
-                    continue;
-                }
-
-                int r = (argb >> 16) & 0xFF;
-                int g = (argb >> 8) & 0xFF;
-                int b = argb & 0xFF;
-
-                java.awt.Color.RGBtoHSB(r, g, b, pixelHsb);
-
-                // Set new hue to target dye hue
-                float newHue = targetHue;
-                // Blend saturation while respecting pixel texture details
-                float newSat = Math.min(1.0f, Math.max(0.10f, pixelHsb[1] * (targetSat > 0.05f ? (0.6f + 0.4f * targetSat) : targetSat)));
-                // Maintain luminance shading and scale with dye brightness
-                float newBri = Math.min(1.0f, Math.max(0.0f, pixelHsb[2] * (0.35f + 0.65f * targetBri)));
-
-                int newRgb = java.awt.Color.HSBtoRGB(newHue, newSat, newBri);
-                int newArgb = (alpha << 24) | (newRgb & 0x00FFFFFF);
-                result.setRGB(x, y, newArgb);
-            }
-        }
-        return result;
     }
 
     public static String getClosestDyeColorName(int rgb) {
@@ -918,28 +999,6 @@ public final class BackpackService {
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             meta.getPersistentDataContainer().set(colorKey, PersistentDataType.INTEGER, rgb);
-
-            String colorName = getClosestDyeColorName(rgb);
-            String dyedModel = "haohan:backpack_" + colorName;
-            String dyedId = "haohan:backpack_dyed_" + Integer.toHexString(rgb);
-
-            if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") != null) {
-                try {
-                    var core = vn.haohan.itemcore.api.HaoHanItemCore.get();
-                    var registry = core.getIconTextureRegistry();
-                    var baseOpt = registry.get("haohan:backpack");
-                    if (baseOpt.isPresent()) {
-                        if (registry.get(dyedModel).isEmpty() || registry.get(dyedId).isEmpty()) {
-                            java.awt.image.BufferedImage shifted = shiftHueImage(baseOpt.get().getImage(), rgb);
-                            if (shifted != null) {
-                                registry.register(dyedModel, new vn.haohan.itemcore.api.texture.IconTexture(dyedModel, shifted));
-                                registry.register(dyedId, new vn.haohan.itemcore.api.texture.IconTexture(dyedId, shifted));
-                            }
-                        }
-                    }
-                } catch (Throwable ignored) { }
-            }
-
             if (meta instanceof LeatherArmorMeta leatherMeta) {
                 leatherMeta.setColor(Color.fromRGB(rgb));
             }
@@ -1087,7 +1146,9 @@ public final class BackpackService {
         int occupiedSlots = 0;
         List<String> itemLines = new ArrayList<>();
 
+        int cap = 64;
         if (inventory != null) {
+            cap = getMaxStackCapacity(inventory);
             for (int slot : STORAGE_SLOTS) {
                 ItemStack stack = inventory.getItem(slot);
                 if (stack != null && !stack.getType().isAir()) {
@@ -1100,21 +1161,21 @@ public final class BackpackService {
             }
         } else if (meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
             byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
-            if (bytes != null) {
-                try (BukkitObjectInputStream in = new BukkitObjectInputStream(new ByteArrayInputStream(bytes))) {
-                    Object value = in.readObject();
-                    if (value instanceof List<?> items) {
-                        for (Object obj : items) {
-                            if (obj instanceof ItemStack stack && !stack.getType().isAir()) {
-                                occupiedSlots++;
-                                if (itemLines.size() < 7) {
-                                    String name = formatItemStackName(stack);
-                                    itemLines.add(" §8• §f" + name + " §7x" + stack.getAmount());
-                                }
-                            }
+            List<ItemStack> items = deserializeToItems(bytes);
+            for (int i = 0; i < items.size(); i++) {
+                ItemStack stack = items.get(i);
+                if (stack != null && !stack.getType().isAir()) {
+                    if (containsStatic(MODULE_SLOTS, i) && isModule(stack)) {
+                        int moduleCap = getModuleStackCapacity(stack);
+                        if (moduleCap > cap) cap = moduleCap;
+                    } else if (!containsStatic(MODULE_SLOTS, i)) {
+                        occupiedSlots++;
+                        if (itemLines.size() < 7) {
+                            String name = formatItemStackName(stack);
+                            itemLines.add(" §8• §f" + name + " §7x" + stack.getAmount());
                         }
                     }
-                } catch (Throwable ignored) { }
+                }
             }
         }
 
@@ -1123,9 +1184,12 @@ public final class BackpackService {
             int rgb = meta.getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
             lore.add("§7Màu sắc: " + getFriendlyDyeName(rgb));
         }
-        lore.add("§7Sức chứa: §e54 slot");
+        lore.add("§7Sức chứa: §e53 slot + 1 module");
+        if (cap > 64) {
+            lore.add("§7Giới hạn Stack: §e" + cap);
+        }
         lore.add("");
-        lore.add("§7─── §fChứa bên trong §8(§e" + occupiedSlots + "§7/§e54§7 slot) §7───");
+        lore.add("§7─── §fChứa bên trong §8(§e" + occupiedSlots + "§7/§e53§7 slot) §7───");
 
         if (itemLines.isEmpty()) {
             lore.add(" §8• §7(Trống)");
@@ -1137,6 +1201,62 @@ public final class BackpackService {
         }
 
         meta.setLore(lore);
+    }
+
+    public List<ItemStack> deserializeToItems(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return List.of();
+        try {
+            if (bytes.length >= 8) {
+                ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+                DataInputStream dataIn = new DataInputStream(bais);
+                int magic = dataIn.readInt();
+                if (magic == 0x48484250) {
+                    int version = dataIn.readInt();
+                    if (version == 2) {
+                        int size = dataIn.readInt();
+                        List<ItemStack> result = new ArrayList<>(size);
+                        try (BukkitObjectInputStream in = new BukkitObjectInputStream(dataIn)) {
+                            for (int i = 0; i < size; i++) {
+                                boolean hasItem = dataIn.readBoolean();
+                                if (hasItem) {
+                                    int realAmount = dataIn.readInt();
+                                    Object obj = in.readObject();
+                                    if (obj instanceof ItemStack stack && !stack.getType().isAir()) {
+                                        stack.setAmount(realAmount);
+                                        cleanCustomStackSize(stack);
+                                        result.add(stack);
+                                    } else {
+                                        result.add(null);
+                                    }
+                                } else {
+                                    result.add(null);
+                                }
+                            }
+                        }
+                        return result;
+                    }
+                }
+            }
+
+            try (BukkitObjectInputStream in = new BukkitObjectInputStream(new ByteArrayInputStream(bytes))) {
+                Object value = in.readObject();
+                if (value instanceof List<?> items) {
+                    List<ItemStack> result = new ArrayList<>();
+                    for (Object obj : items) {
+                        if (obj instanceof ItemStack stack) {
+                            cleanCustomStackSize(stack);
+                            result.add(stack);
+                        } else {
+                            result.add(null);
+                        }
+                    }
+                    return result;
+                }
+            }
+        } catch (Throwable ex) {
+            plugin.getLogger().warning("Không đọc được serialized contents: " + ex.getMessage());
+        }
+        return List.of();
     }
 
     private String formatItemStackName(ItemStack stack) {
@@ -1159,9 +1279,34 @@ public final class BackpackService {
     }
 
     private byte[] serializeInventory(Inventory inventory) {
-        List<ItemStack> items = new ArrayList<>(); for (int slot : STORAGE_SLOTS) items.add(inventory.getItem(slot));
-        try { ByteArrayOutputStream bytes = new ByteArrayOutputStream(); try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(bytes)) { out.writeObject(items); } return bytes.toByteArray(); }
-        catch (IOException ex) { throw new IllegalStateException("Không serialize được backpack", ex); }
+        try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+             DataOutputStream dataOut = new DataOutputStream(bytes)) {
+            dataOut.writeInt(0x48484250); // Magic 'HHBP'
+            dataOut.writeInt(2); // Version 2
+            dataOut.writeInt(54);
+
+            try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(dataOut)) {
+                for (int physical = 0; physical < 54; physical++) {
+                    ItemStack item = inventory.getItem(physical);
+                    if (item == null || item.getType().isAir() || (containsStatic(MODULE_SLOTS, physical) && isEmptyModuleSocket(item))) {
+                        dataOut.writeBoolean(false);
+                    } else {
+                        dataOut.writeBoolean(true);
+                        int realAmount = item.getAmount();
+                        dataOut.writeInt(realAmount);
+
+                        ItemStack toSerialize = item.clone();
+                        toSerialize.setAmount(1); // Set to 1 so CraftMagicNumbers [1;99] codec never fails
+                        cleanCustomStackSize(toSerialize);
+                        out.writeObject(toSerialize);
+                    }
+                }
+                out.flush();
+            }
+            return bytes.toByteArray();
+        } catch (IOException ex) {
+            throw new IllegalStateException("Không serialize được backpack", ex);
+        }
     }
 
     private TileState placedState(Inventory inventory) {
@@ -1184,7 +1329,8 @@ public final class BackpackService {
     public ItemStack removeFromPlacedBackpack(Inventory inventory, ItemStack requested) {
         TileState state = placedState(inventory); if (state == null || requested == null) return null;
         Inventory temp = plugin.getServer().createInventory(null, 54);
-        loadContainer(state, temp);
+     
+
         ItemStack wanted = requested.clone();
         int before = wanted.getAmount();
         int remaining = temp.removeItem(wanted).values().stream().mapToInt(ItemStack::getAmount).sum();
@@ -1194,6 +1340,7 @@ public final class BackpackService {
         wanted.setAmount(removed);
         return wanted;
     }
+
     public List<ItemStack> removePlacedContents(Location location) {
         UUID storage = UUID.nameUUIDFromBytes(storageKey(location).getBytes(StandardCharsets.UTF_8));
         List<ItemStack> contents = new ArrayList<>(); File file = file(storage);
@@ -1222,18 +1369,25 @@ public final class BackpackService {
 
     private List<ItemStack> removeContents(UUID storage) {
         List<ItemStack> contents = new ArrayList<>();
-        if (database != null) contents.addAll(database.load(storage));
+     
+
         databaseDelete(storage);
+
         File file = file(storage); if (file.exists()) file.delete();
+
         return contents;
     }
 
     private void databaseDelete(UUID storage) { if (database != null) database.delete(storage); }
+
     private String storageKey(Location location) {
         return location.getWorld().getUID() + ":" + location.getBlockX() + ":" + location.getBlockY() + ":" + location.getBlockZ();
     }
+
     private UUID storageId(String value) { try { return UUID.fromString(value); } catch (IllegalArgumentException ex) { return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)); } }
+
     private String color(String text) { return ChatColor.translateAlternateColorCodes('&', text); }
+
     private Component component(String text) { return LegacyComponentSerializer.legacyAmpersand().deserialize(text); }
 
     public void updateWornBackpack(Player player) {

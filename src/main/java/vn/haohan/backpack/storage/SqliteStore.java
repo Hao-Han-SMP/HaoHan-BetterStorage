@@ -72,17 +72,72 @@ public final class SqliteStore implements AutoCloseable {
 
     private byte[] serialize(List<ItemStack> items) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(bytes)) { out.writeObject(items); }
+        java.io.DataOutputStream dataOut = new java.io.DataOutputStream(bytes);
+        dataOut.writeInt(0x48484250); // 'HHBP'
+        dataOut.writeInt(2); // Version 2
+        dataOut.writeInt(items.size());
+
+        try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(dataOut)) {
+            for (ItemStack item : items) {
+                if (item == null || item.getType().isAir()) {
+                    dataOut.writeBoolean(false);
+                } else {
+                    dataOut.writeBoolean(true);
+                    int realAmount = item.getAmount();
+                    dataOut.writeInt(realAmount);
+
+                    ItemStack toSerialize = item.clone();
+                    toSerialize.setAmount(1); // Set to 1 so CraftMagicNumbers [1;99] codec never fails
+                    out.writeObject(toSerialize);
+                }
+            }
+            out.flush();
+        }
         return bytes.toByteArray();
     }
 
     @SuppressWarnings("unchecked")
     private List<ItemStack> deserialize(byte[] bytes) throws IOException {
-        if (bytes == null) return List.of();
-        try (BukkitObjectInputStream in = new BukkitObjectInputStream(new ByteArrayInputStream(bytes))) {
-            Object value = in.readObject();
-            return value instanceof List<?> list ? (List<ItemStack>) list : List.of();
-        } catch (ClassNotFoundException ex) { throw new IOException(ex); }
+        if (bytes == null || bytes.length == 0) return List.of();
+        try {
+            if (bytes.length >= 8) {
+                ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+                java.io.DataInputStream dataIn = new java.io.DataInputStream(bais);
+                int magic = dataIn.readInt();
+                if (magic == 0x48484250) {
+                    int version = dataIn.readInt();
+                    if (version == 2) {
+                        int size = dataIn.readInt();
+                        List<ItemStack> result = new ArrayList<>(size);
+                        try (BukkitObjectInputStream in = new BukkitObjectInputStream(dataIn)) {
+                            for (int i = 0; i < size; i++) {
+                                boolean hasItem = dataIn.readBoolean();
+                                if (hasItem) {
+                                    int realAmount = dataIn.readInt();
+                                    Object obj = in.readObject();
+                                    if (obj instanceof ItemStack stack && !stack.getType().isAir()) {
+                                        stack.setAmount(realAmount);
+                                        result.add(stack);
+                                    } else {
+                                        result.add(null);
+                                    }
+                                } else {
+                                    result.add(null);
+                                }
+                            }
+                        }
+                        return result;
+                    }
+                }
+            }
+
+            try (BukkitObjectInputStream in = new BukkitObjectInputStream(new ByteArrayInputStream(bytes))) {
+                Object value = in.readObject();
+                return value instanceof List<?> list ? (List<ItemStack>) list : List.of();
+            }
+        } catch (ClassNotFoundException ex) {
+            throw new IOException(ex);
+        }
     }
 
     @Override public void close() throws SQLException { connection.close(); }

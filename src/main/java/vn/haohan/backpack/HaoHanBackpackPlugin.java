@@ -13,6 +13,7 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        vn.haohan.backpack.hook.NmsStackHelper.initialize();
         NamespacedKey itemKey = new NamespacedKey(this, "backpack_item");
         backpackService = new BackpackService(this, itemKey);
         backpackService.registerItemCoreDefinition();

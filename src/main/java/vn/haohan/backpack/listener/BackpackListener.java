@@ -34,11 +34,17 @@ import org.bukkit.DyeColor;
 import org.bukkit.Material;
 import org.bukkit.event.inventory.PrepareItemCraftEvent;
 import org.bukkit.inventory.CraftingInventory;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.LeatherArmorMeta;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.ClickType;
+import net.kyori.adventure.text.Component;
 import vn.haohan.backpack.gui.BackpackHolder;
 import vn.haohan.backpack.service.BackpackService;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -143,6 +149,45 @@ public final class BackpackListener implements Listener {
             event.setCancelled(true);
             return;
         }
+
+        // Snapshot matrix before craft
+        ItemStack[] matrixSnapshot = new ItemStack[matrix.length];
+        for (int i = 0; i < matrix.length; i++) {
+            matrixSnapshot[i] = matrix[i] != null ? matrix[i].clone() : null;
+        }
+
+        // Post-craft sync task to ensure matrix items are decremented properly
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            ItemStack[] currentMatrix = inv.getMatrix();
+            boolean changed = false;
+
+            for (int i = 0; i < matrixSnapshot.length; i++) {
+                ItemStack before = matrixSnapshot[i];
+                if (before == null || before.getType().isAir()) continue;
+
+                int expectedAmount = before.getAmount() - 1;
+                ItemStack cur = (i < currentMatrix.length) ? currentMatrix[i] : null;
+
+                if (expectedAmount <= 0) {
+                    if (cur != null && !cur.getType().isAir()) {
+                        currentMatrix[i] = null;
+                        changed = true;
+                    }
+                } else {
+                    if (cur == null || cur.getType().isAir() || cur.getAmount() != expectedAmount) {
+                        ItemStack fixed = before.clone();
+                        fixed.setAmount(expectedAmount);
+                        currentMatrix[i] = fixed;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (changed) {
+                inv.setMatrix(currentMatrix);
+                player.updateInventory();
+            }
+        });
 
         // Play equip sound on successful dye craft
         player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
@@ -473,13 +518,86 @@ public final class BackpackListener implements Listener {
         }
 
         if (!(top.getHolder() instanceof BackpackHolder)) {
+            handleNonBackpackClick(event, player, cursor, currentItem);
             return;
         }
 
         int raw = event.getRawSlot();
         boolean isTop = raw >= 0 && raw < top.getSize();
 
-        // Prevent clicking/interacting with non-storage decorative slots (e.g. module slot 47)
+        // Handle Module Sockets (Slots in MODULE_SLOTS: 47, 48, 49, 50, 51)
+        if (isTop && service.isModuleSlot(raw)) {
+            event.setCancelled(true);
+            ItemStack currentModule = top.getItem(raw);
+            boolean isCurModule = service.isModule(currentModule);
+
+            if (service.isModule(cursor)) {
+                // Place or swap module
+                if (!isCurModule || service.isEmptyModuleSocket(currentModule)) {
+                    ItemStack toPlace = cursor.clone();
+                    toPlace.setAmount(1);
+                    service.cleanCustomStackSize(toPlace);
+                    top.setItem(raw, toPlace);
+
+                    if (cursor.getAmount() > 1) {
+                        cursor.setAmount(cursor.getAmount() - 1);
+                        player.setItemOnCursor(cursor);
+                    } else {
+                        player.setItemOnCursor(null);
+                    }
+                    service.applyCustomStackLimits(top);
+                    player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.8f, 1.5f);
+                    player.sendMessage(Component.text("§a✔ Đã kích hoạt Upgrade Module! Giới hạn stack cao nhất: §e" + service.getMaxStackCapacity(top)));
+                } else {
+                    // Swap module
+                    ItemStack oldModule = currentModule.clone();
+                    service.cleanCustomStackSize(oldModule);
+                    ItemStack toPlace = cursor.clone();
+                    toPlace.setAmount(1);
+                    service.cleanCustomStackSize(toPlace);
+                    top.setItem(raw, toPlace);
+                    player.setItemOnCursor(oldModule);
+                    service.applyCustomStackLimits(top);
+                    player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.8f, 1.5f);
+                    player.sendMessage(Component.text("§a✔ Đã đổi Upgrade Module! Giới hạn stack cao nhất: §e" + service.getMaxStackCapacity(top)));
+                }
+            } else if ((cursor == null || cursor.getType().isAir()) && isCurModule) {
+                // Take out module
+                ItemStack taken = currentModule.clone();
+                service.cleanCustomStackSize(taken);
+                top.setItem(raw, service.createModuleSocketItem());
+                player.setItemOnCursor(taken);
+
+                int newCap = service.getMaxStackCapacity(top);
+                for (int slot : BackpackService.STORAGE_SLOTS) {
+                    ItemStack item = top.getItem(slot);
+                    if (item != null && !item.getType().isAir()) {
+                        if (item.getAmount() > newCap) {
+                            int excess = item.getAmount() - newCap;
+                            item.setAmount(newCap);
+                            service.applyCustomStackSize(item, newCap);
+                            top.setItem(slot, item);
+
+                            ItemStack eject = item.clone();
+                            eject.setAmount(excess);
+                            service.cleanCustomStackSize(eject);
+                            Map<Integer, ItemStack> left = player.getInventory().addItem(eject);
+                            for (ItemStack leftover : left.values()) {
+                                player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+                            }
+                        } else {
+                            service.applyCustomStackSize(item, newCap);
+                        }
+                    }
+                }
+                player.playSound(player.getLocation(), Sound.BLOCK_BEACON_DEACTIVATE, 0.8f, 1.2f);
+                player.sendMessage(Component.text("§c✖ Đã gỡ Upgrade Module. Giới hạn stack hiện tại: §e" + newCap));
+            }
+            player.updateInventory();
+            return;
+        }
+
+        // Prevent clicking/interacting with other non-storage decorative slots
         if (isTop && !isStorage(raw)) {
             event.setCancelled(true);
             return;
@@ -505,49 +623,352 @@ public final class BackpackListener implements Listener {
             }
         }
 
+        int maxCap = service.getMaxStackCapacity(top);
+        top.setMaxStackSize(maxCap);
+
+        // Block Offhand swap key (F) on backpack slots to prevent overflow into offhand
+        if (isTop && event.getClick() == ClickType.SWAP_OFFHAND) {
+            event.setCancelled(true);
+            return;
+        }
+
+        // Custom Deep-Stack Storage Slot Click Handlers
+        if (isTop && isStorage(raw)) {
+            ItemStack existing = top.getItem(raw);
+            boolean cursorHasItem = cursor != null && !cursor.getType().isAir();
+            boolean slotHasItem = existing != null && !existing.getType().isAir();
+
+            // Number key hotbar swap (1-9)
+            if (event.getClick() == ClickType.NUMBER_KEY) {
+                event.setCancelled(true);
+                int hotbarSlot = event.getHotbarButton();
+                if (hotbarSlot < 0 || hotbarSlot > 8) return;
+                ItemStack hotbarItem = player.getInventory().getItem(hotbarSlot);
+                boolean hotbarHas = hotbarItem != null && !hotbarItem.getType().isAir();
+
+                if (hotbarHas && service.isBackpack(hotbarItem) && !service.allowBackpacksInsideBackpacks()) return;
+
+                if (!hotbarHas && slotHasItem) {
+                    int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(existing.getType());
+                    if (vanillaMax <= 0) vanillaMax = 64;
+                    int take = Math.min(existing.getAmount(), vanillaMax);
+                    ItemStack toHotbar = existing.clone();
+                    toHotbar.setAmount(take);
+                    service.cleanCustomStackSize(toHotbar);
+                    player.getInventory().setItem(hotbarSlot, toHotbar);
+
+                    if (existing.getAmount() - take <= 0) {
+                        top.setItem(raw, null);
+                    } else {
+                        existing.setAmount(existing.getAmount() - take);
+                        service.applyCustomStackSize(existing, maxCap);
+                        top.setItem(raw, existing);
+                    }
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                } else if (hotbarHas && !slotHasItem) {
+                    ItemStack toStorage = hotbarItem.clone();
+                    service.applyCustomStackSize(toStorage, maxCap);
+                    top.setItem(raw, toStorage);
+                    player.getInventory().setItem(hotbarSlot, null);
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                } else if (hotbarHas && slotHasItem) {
+                    if (service.isSimilarIgnoringCustomStack(existing, hotbarItem)) {
+                        int space = maxCap - existing.getAmount();
+                        if (space > 0) {
+                            int move = Math.min(space, hotbarItem.getAmount());
+                            existing.setAmount(existing.getAmount() + move);
+                            service.applyCustomStackSize(existing, maxCap);
+                            top.setItem(raw, existing);
+                            if (hotbarItem.getAmount() - move <= 0) {
+                                player.getInventory().setItem(hotbarSlot, null);
+                            } else {
+                                hotbarItem.setAmount(hotbarItem.getAmount() - move);
+                                player.getInventory().setItem(hotbarSlot, hotbarItem);
+                            }
+                            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                            syncBackpackSlot(player, top, raw);
+                            return;
+                        }
+                    } else {
+                        int existingVanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(existing.getType());
+                        if (existingVanillaMax <= 0) existingVanillaMax = 64;
+                        if (existing.getAmount() <= existingVanillaMax) {
+                            ItemStack newHotbar = existing.clone();
+                            service.cleanCustomStackSize(newHotbar);
+                            ItemStack newStorage = hotbarItem.clone();
+                            service.applyCustomStackSize(newStorage, maxCap);
+                            player.getInventory().setItem(hotbarSlot, newHotbar);
+                            top.setItem(raw, newStorage);
+                            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                            syncBackpackSlot(player, top, raw);
+                            return;
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Drop key (Q or Ctrl+Q)
+            if (event.getClick() == ClickType.DROP || event.getClick() == ClickType.CONTROL_DROP) {
+                event.setCancelled(true);
+                if (slotHasItem) {
+                    int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(existing.getType());
+                    if (vanillaMax <= 0) vanillaMax = 64;
+                    int dropAmount = event.getClick() == ClickType.DROP ? 1 : Math.min(existing.getAmount(), vanillaMax);
+                    ItemStack dropped = existing.clone();
+                    dropped.setAmount(dropAmount);
+                    service.cleanCustomStackSize(dropped);
+
+                    if (existing.getAmount() - dropAmount <= 0) {
+                        top.setItem(raw, null);
+                    } else {
+                        existing.setAmount(existing.getAmount() - dropAmount);
+                        service.applyCustomStackSize(existing, maxCap);
+                        top.setItem(raw, existing);
+                    }
+                    org.bukkit.entity.Item entity = player.getWorld().dropItemNaturally(player.getEyeLocation(), dropped);
+                    entity.setVelocity(player.getLocation().getDirection().multiply(0.3));
+                    syncBackpackSlot(player, top, raw);
+                }
+                return;
+            }
+
+            // Double Click / Collect to Cursor
+            if (event.getAction() == InventoryAction.COLLECT_TO_CURSOR || event.getClick() == ClickType.DOUBLE_CLICK) {
+                event.setCancelled(true);
+                if (cursorHasItem) {
+                    int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(cursor.getType());
+                    if (vanillaMax <= 0) vanillaMax = 64;
+                    if (cursor.getAmount() < vanillaMax) {
+                        int needed = vanillaMax - cursor.getAmount();
+                        for (int slot : BackpackService.STORAGE_SLOTS) {
+                            ItemStack item = top.getItem(slot);
+                            if (item != null && !item.getType().isAir() && service.isSimilarIgnoringCustomStack(item, cursor)) {
+                                int take = Math.min(needed, item.getAmount());
+                                if (item.getAmount() - take <= 0) {
+                                    top.setItem(slot, null);
+                                } else {
+                                    item.setAmount(item.getAmount() - take);
+                                    top.setItem(slot, item);
+                                }
+                                cursor.setAmount(cursor.getAmount() + take);
+                                needed -= take;
+                                if (needed <= 0) break;
+                            }
+                        }
+                        player.setItemOnCursor(cursor);
+                        player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                        player.updateInventory();
+                    }
+                }
+                return;
+            }
+
+            if (!cursorHasItem && slotHasItem) {
+                // Clicking on item with empty cursor (Pick up up to 64 per click)
+                int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(existing.getType());
+                if (vanillaMax <= 0) vanillaMax = 64;
+
+                if (event.getClick() == ClickType.LEFT) {
+                    event.setCancelled(true);
+                    if (existing.getAmount() > vanillaMax) {
+                        ItemStack pick = existing.clone();
+                        pick.setAmount(vanillaMax);
+                        service.cleanCustomStackSize(pick);
+                        existing.setAmount(existing.getAmount() - vanillaMax);
+                        service.applyCustomStackSize(existing, maxCap);
+                        top.setItem(raw, existing);
+                        player.setItemOnCursor(pick);
+                    } else {
+                        ItemStack pick = existing.clone();
+                        service.cleanCustomStackSize(pick);
+                        top.setItem(raw, null);
+                        player.setItemOnCursor(pick);
+                    }
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                } else if (event.getClick() == ClickType.RIGHT) {
+                    event.setCancelled(true);
+                    int half = Math.min(vanillaMax, (existing.getAmount() + 1) / 2);
+                    ItemStack pick = existing.clone();
+                    pick.setAmount(half);
+                    service.cleanCustomStackSize(pick);
+                    if (existing.getAmount() - half > 0) {
+                        existing.setAmount(existing.getAmount() - half);
+                        service.applyCustomStackSize(existing, maxCap);
+                        top.setItem(raw, existing);
+                    } else {
+                        top.setItem(raw, null);
+                    }
+                    player.setItemOnCursor(pick);
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                }
+            } else if (cursorHasItem && !slotHasItem) {
+                // Placing cursor into empty storage slot
+                if (event.getClick() == ClickType.LEFT) {
+                    event.setCancelled(true);
+                    ItemStack toPlace = cursor.clone();
+                    service.applyCustomStackSize(toPlace, maxCap);
+                    top.setItem(raw, toPlace);
+                    player.setItemOnCursor(null);
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                } else if (event.getClick() == ClickType.RIGHT) {
+                    event.setCancelled(true);
+                    ItemStack place = cursor.clone();
+                    place.setAmount(1);
+                    service.applyCustomStackSize(place, maxCap);
+                    top.setItem(raw, place);
+                    if (cursor.getAmount() > 1) {
+                        cursor.setAmount(cursor.getAmount() - 1);
+                        player.setItemOnCursor(cursor);
+                    } else {
+                        player.setItemOnCursor(null);
+                    }
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                }
+            } else if (cursorHasItem && slotHasItem) {
+                // Stacking or swapping
+                if (service.isSimilarIgnoringCustomStack(existing, cursor)) {
+                    if (event.getClick() == ClickType.LEFT) {
+                        event.setCancelled(true);
+                        int space = maxCap - existing.getAmount();
+                        if (space > 0) {
+                            int toMove = Math.min(space, cursor.getAmount());
+                            existing.setAmount(existing.getAmount() + toMove);
+                            service.applyCustomStackSize(existing, maxCap);
+                            top.setItem(raw, existing);
+                            if (cursor.getAmount() > toMove) {
+                                cursor.setAmount(cursor.getAmount() - toMove);
+                                player.setItemOnCursor(cursor);
+                            } else {
+                                player.setItemOnCursor(null);
+                            }
+                            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                            syncBackpackSlot(player, top, raw);
+                            return;
+                        }
+                    } else if (event.getClick() == ClickType.RIGHT) {
+                        event.setCancelled(true);
+                        if (existing.getAmount() < maxCap && cursor.getAmount() >= 1) {
+                            existing.setAmount(existing.getAmount() + 1);
+                            service.applyCustomStackSize(existing, maxCap);
+                            top.setItem(raw, existing);
+                            if (cursor.getAmount() > 1) {
+                                cursor.setAmount(cursor.getAmount() - 1);
+                                player.setItemOnCursor(cursor);
+                            } else {
+                                player.setItemOnCursor(null);
+                            }
+                            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                            syncBackpackSlot(player, top, raw);
+                            return;
+                        }
+                    }
+                } else if (event.getClick() == ClickType.LEFT && cursor.getAmount() <= 64 && existing.getAmount() <= 64) {
+                    // Swap different items
+                    event.setCancelled(true);
+                    ItemStack temp = existing.clone();
+                    service.cleanCustomStackSize(temp);
+                    ItemStack toPlace = cursor.clone();
+                    service.applyCustomStackSize(toPlace, maxCap);
+                    top.setItem(raw, toPlace);
+                    player.setItemOnCursor(temp);
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
+                    return;
+                }
+            }
+        }
+
         // Handle Shift-Clicking (Quick Move between Backpack & Inventory)
         if (event.isShiftClick()) {
             event.setCancelled(true);
             if (current == null || current.getType().isAir()) return;
 
             if (isTop) {
-                // Shift-click FROM Backpack TO Player Inventory (filling from last slot 35 down to 0)
+                // Shift-click FROM Backpack TO Player Inventory: take 1 stack (up to 64) per shift-click
                 if (!isStorage(raw)) return;
-                Map<Integer, ItemStack> leftovers = addItemToPlayerInventoryReverse(player.getInventory(), current.clone());
-                if (leftovers.isEmpty()) {
-                    top.setItem(raw, null);
-                } else {
-                    top.setItem(raw, leftovers.values().iterator().next());
+                int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(current.getType());
+                if (vanillaMax <= 0) vanillaMax = 64;
+
+                int amountToTake = Math.min(current.getAmount(), vanillaMax);
+                ItemStack chunk = current.clone();
+                chunk.setAmount(amountToTake);
+                service.cleanCustomStackSize(chunk);
+
+                PlayerInventory playerInv = player.getInventory();
+                Map<Integer, ItemStack> leftovers = addItemToPlayerInventoryReverse(playerInv, chunk);
+                int transferred = amountToTake - leftovers.values().stream().mapToInt(ItemStack::getAmount).sum();
+
+                if (transferred > 0) {
+                    if (current.getAmount() - transferred <= 0) {
+                        top.setItem(raw, null);
+                    } else {
+                        current.setAmount(current.getAmount() - transferred);
+                        service.applyCustomStackSize(current, maxCap);
+                        top.setItem(raw, current);
+                    }
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    syncBackpackSlot(player, top, raw);
                 }
-                player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                return;
             } else {
-                // Shift-click FROM Player Inventory TO Backpack
+                // Shift-click FROM Player Inventory TO Backpack (packing up to maxCap)
                 if (service.isBackpack(current) && !service.allowBackpacksInsideBackpacks()) return;
 
                 ItemStack toMove = current.clone();
+
+                // Pass 1: Try stacking into existing similar stacks
                 for (int slot : BackpackService.STORAGE_SLOTS) {
                     ItemStack existing = top.getItem(slot);
-                    if (existing == null || existing.getType().isAir()) {
-                        top.setItem(slot, toMove);
-                        event.setCurrentItem(null);
-                        player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
-                        return;
-                    } else if (existing.isSimilar(toMove) && existing.getAmount() < existing.getMaxStackSize()) {
-                        int space = existing.getMaxStackSize() - existing.getAmount();
+                    if (existing != null && !existing.getType().isAir() && service.isSimilarIgnoringCustomStack(existing, toMove) && existing.getAmount() < maxCap) {
+                        int space = maxCap - existing.getAmount();
                         int move = Math.min(space, toMove.getAmount());
-                        existing.setAmount(existing.getAmount() + move);
-                        top.setItem(slot, existing);
+                        ItemStack updated = existing.clone();
+                        updated.setAmount(existing.getAmount() + move);
+                        service.applyCustomStackSize(updated, maxCap);
+                        top.setItem(slot, updated);
+                        syncBackpackSlot(player, top, slot);
                         toMove.setAmount(toMove.getAmount() - move);
                         if (toMove.getAmount() <= 0) {
                             event.setCurrentItem(null);
                             player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                            player.updateInventory();
                             return;
                         }
                     }
                 }
+
+                // Pass 2: Place remaining into empty slots
+                for (int slot : BackpackService.STORAGE_SLOTS) {
+                    ItemStack existing = top.getItem(slot);
+                    if (existing == null || existing.getType().isAir()) {
+                        ItemStack placed = toMove.clone();
+                        service.applyCustomStackSize(placed, maxCap);
+                        top.setItem(slot, placed);
+                        syncBackpackSlot(player, top, slot);
+                        event.setCurrentItem(null);
+                        player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                        player.updateInventory();
+                        return;
+                    }
+                }
+
                 if (toMove.getAmount() != current.getAmount()) {
                     event.setCurrentItem(toMove);
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    player.updateInventory();
                 }
             }
             return;
@@ -556,6 +977,52 @@ public final class BackpackListener implements Listener {
         if (service.allowBackpacksInsideBackpacks() && service.isBackpack(current) && !isTop) {
             event.setCancelled(true);
             service.openItem(player, current);
+            return;
+        }
+
+        if (!isTop) {
+            handleNonBackpackClick(event, player, cursor, current);
+        }
+    }
+
+    private void handleNonBackpackClick(InventoryClickEvent event, Player player, ItemStack cursor, ItemStack current) {
+        if (event.isCancelled()) return;
+        boolean cursorHasItem = cursor != null && !cursor.getType().isAir();
+        boolean slotHasItem = current != null && !current.getType().isAir();
+
+        if (cursorHasItem && slotHasItem && cursor.isSimilar(current)) {
+            int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(cursor.getType());
+            if (vanillaMax <= 1) return;
+
+            if (event.getClick() == ClickType.LEFT) {
+                if (current.getAmount() >= vanillaMax) {
+                    event.setCancelled(true);
+                    return;
+                }
+                if (current.getAmount() + cursor.getAmount() > vanillaMax) {
+                    event.setCancelled(true);
+                    int move = vanillaMax - current.getAmount();
+                    current.setAmount(vanillaMax);
+                    event.setCurrentItem(current);
+                    if (cursor.getAmount() > move) {
+                        cursor.setAmount(cursor.getAmount() - move);
+                        player.setItemOnCursor(cursor);
+                    } else {
+                        player.setItemOnCursor(null);
+                    }
+                    player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                    player.updateInventory();
+                }
+            } else if (event.getClick() == ClickType.RIGHT) {
+                if (current.getAmount() >= vanillaMax) {
+                    event.setCancelled(true);
+                }
+            }
+        } else if (event.getAction() == InventoryAction.COLLECT_TO_CURSOR && cursorHasItem) {
+            int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(cursor.getType());
+            if (cursor.getAmount() >= vanillaMax) {
+                event.setCancelled(true);
+            }
         }
     }
 
@@ -576,13 +1043,34 @@ public final class BackpackListener implements Listener {
             }
         }
 
-        if (!isTopBackpack) return;
-
-        if (event.getRawSlots().stream().anyMatch(slot -> slot < event.getView().getTopInventory().getSize() && !isStorage(slot))) {
-            event.setCancelled(true);
+        if (isTopBackpack) {
+            if (event.getRawSlots().stream().anyMatch(slot -> slot < top.getSize() && !isStorage(slot))) {
+                event.setCancelled(true);
+            }
+            if (!event.isCancelled() && (service.isBlocked(event.getOldCursor()) || (service.isBackpack(event.getOldCursor()) && !service.allowBackpacksInsideBackpacks()))) {
+                event.setCancelled(true);
+            }
+            if (!event.isCancelled()) {
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    service.applyCustomStackLimits(top);
+                    if (event.getWhoClicked() instanceof Player player) {
+                        player.updateInventory();
+                    }
+                });
+            }
+            return;
         }
-        if (!event.isCancelled() && (service.isBlocked(event.getOldCursor()) || (service.isBackpack(event.getOldCursor()) && !service.allowBackpacksInsideBackpacks()))) {
-            event.setCancelled(true);
+
+        // Non-backpack drag: ensure no slots exceed vanilla max
+        ItemStack oldCursor = event.getOldCursor();
+        if (oldCursor != null && !oldCursor.getType().isAir()) {
+            int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(oldCursor.getType());
+            for (ItemStack newItem : event.getNewItems().values()) {
+                if (newItem != null && newItem.getAmount() > vanillaMax) {
+                    event.setCancelled(true);
+                    return;
+                }
+            }
         }
     }
 
@@ -618,12 +1106,37 @@ public final class BackpackListener implements Listener {
         if (event.getPlayer() instanceof Player player) {
             service.updateWornBackpack(player);
             if (event.getInventory().getHolder() instanceof BackpackHolder) service.close(player, event.getInventory());
+            sanitizePlayerInventory(player);
         }
     }
     @EventHandler public void onQuit(PlayerQuitEvent event) {
         Inventory top = event.getPlayer().getOpenInventory().getTopInventory();
         if (top.getHolder() instanceof BackpackHolder) service.close(event.getPlayer(), top);
         service.removeWornBackpack(event.getPlayer());
+        sanitizePlayerInventory(event.getPlayer());
+    }
+
+    public static void sanitizePlayerInventory(Player player) {
+        if (player == null) return;
+        PlayerInventory inv = player.getInventory();
+        for (int i = 0; i < 36; i++) {
+            ItemStack item = inv.getItem(i);
+            if (item != null && !item.getType().isAir()) {
+                int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(item.getType());
+                if (vanillaMax > 0 && item.getAmount() > vanillaMax) {
+                    int excess = item.getAmount() - vanillaMax;
+                    item.setAmount(vanillaMax);
+                    inv.setItem(i, item);
+
+                    ItemStack extra = item.clone();
+                    extra.setAmount(excess);
+                    Map<Integer, ItemStack> left = inv.addItem(extra);
+                    for (ItemStack leftover : left.values()) {
+                        player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+                    }
+                }
+            }
+        }
     }
     @EventHandler public void onJoin(PlayerJoinEvent event) {
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
@@ -642,8 +1155,52 @@ public final class BackpackListener implements Listener {
     private boolean isStorage(int slot) { for (int value : BackpackService.STORAGE_SLOTS) if (value == slot) return true; return false; }
 
     @EventHandler public void onPickup(EntityPickupItemEvent event) {
-        if (!(event.getEntity() instanceof Player player) || !service.isBackpack(event.getItem().getItemStack())) return;
-        if (!service.canReceiveBackpacks(player, event.getItem().getItemStack().getAmount())) event.setCancelled(true);
+        if (!(event.getEntity() instanceof Player player)) return;
+        ItemStack item = event.getItem().getItemStack();
+        if (service.isBackpack(item)) {
+            if (!service.canReceiveBackpacks(player, item.getAmount())) event.setCancelled(true);
+            return;
+        }
+
+        int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(item.getType());
+        if (vanillaMax > 1 && item.getAmount() > 0) {
+            ItemStack toAdd = item.clone();
+            for (int i = 0; i < 36; i++) {
+                ItemStack slotItem = player.getInventory().getItem(i);
+                if (slotItem != null && slotItem.isSimilar(toAdd) && slotItem.getAmount() < vanillaMax) {
+                    int space = vanillaMax - slotItem.getAmount();
+                    int move = Math.min(space, toAdd.getAmount());
+                    slotItem.setAmount(slotItem.getAmount() + move);
+                    player.getInventory().setItem(i, slotItem);
+                    toAdd.setAmount(toAdd.getAmount() - move);
+                    if (toAdd.getAmount() <= 0) break;
+                }
+            }
+            if (toAdd.getAmount() > 0) {
+                for (int i = 0; i < 36; i++) {
+                    ItemStack slotItem = player.getInventory().getItem(i);
+                    if (slotItem == null || slotItem.getType().isAir()) {
+                        int move = Math.min(vanillaMax, toAdd.getAmount());
+                        ItemStack placed = toAdd.clone();
+                        placed.setAmount(move);
+                        player.getInventory().setItem(i, placed);
+                        toAdd.setAmount(toAdd.getAmount() - move);
+                        if (toAdd.getAmount() <= 0) break;
+                    }
+                }
+            }
+            event.setCancelled(true);
+            int taken = item.getAmount() - toAdd.getAmount();
+            if (taken > 0) {
+                player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.2f, 1.5f);
+                if (toAdd.getAmount() <= 0) {
+                    event.getItem().remove();
+                } else {
+                    item.setAmount(toAdd.getAmount());
+                    event.getItem().setItemStack(item);
+                }
+            }
+        }
     }
 
     @EventHandler public void onDeath(PlayerDeathEvent event) {
@@ -680,13 +1237,17 @@ public final class BackpackListener implements Listener {
     private static ItemStack stackIntoSlotsReverse(org.bukkit.inventory.PlayerInventory inv, ItemStack item, int startSlot, int endSlotMin) {
         for (int i = startSlot; i >= endSlotMin; i--) {
             ItemStack existing = inv.getItem(i);
-            if (existing != null && !existing.getType().isAir() && existing.isSimilar(item) && existing.getAmount() < existing.getMaxStackSize()) {
-                int space = existing.getMaxStackSize() - existing.getAmount();
-                int move = Math.min(space, item.getAmount());
-                existing.setAmount(existing.getAmount() + move);
-                inv.setItem(i, existing);
-                item.setAmount(item.getAmount() - move);
-                if (item.getAmount() <= 0) break;
+            if (existing != null && !existing.getType().isAir() && existing.isSimilar(item)) {
+                int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(existing.getType());
+                if (vanillaMax <= 0) vanillaMax = 64;
+                if (existing.getAmount() < vanillaMax) {
+                    int space = vanillaMax - existing.getAmount();
+                    int move = Math.min(space, item.getAmount());
+                    existing.setAmount(existing.getAmount() + move);
+                    inv.setItem(i, existing);
+                    item.setAmount(item.getAmount() - move);
+                    if (item.getAmount() <= 0) break;
+                }
             }
         }
         return item;
@@ -702,5 +1263,86 @@ public final class BackpackListener implements Listener {
             }
         }
         return item;
+    }
+
+    public static void sendDirectSlotUpdate(Player player, int rawSlot, ItemStack item) {
+        if (player == null || !player.isOnline()) return;
+        try {
+            Class<?> craftPlayerClass = Class.forName("org.bukkit.craftbukkit.entity.CraftPlayer");
+            Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
+            Object craftPlayer = craftPlayerClass.cast(player);
+            Method getHandle = craftPlayerClass.getMethod("getHandle");
+            Object serverPlayer = getHandle.invoke(craftPlayer);
+
+            Field containerMenuField = serverPlayer.getClass().getField("containerMenu");
+            Object containerMenu = containerMenuField.get(serverPlayer);
+
+            Field containerIdField = containerMenu.getClass().getField("containerId");
+            int containerId = (int) containerIdField.get(containerMenu);
+
+            Method getStateId = containerMenu.getClass().getMethod("getStateId");
+            int stateId = (int) getStateId.invoke(containerMenu);
+
+            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
+            Object nmsItem = asNMSCopy.invoke(null, item == null ? new ItemStack(Material.AIR) : item);
+
+            Class<?> setSlotPacketClass = Class.forName("net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket");
+            Object packet = setSlotPacketClass.getConstructor(int.class, int.class, int.class, Class.forName("net.minecraft.world.item.ItemStack"))
+                    .newInstance(containerId, stateId, rawSlot, nmsItem);
+
+            Field connectionField = serverPlayer.getClass().getField("connection");
+            Object connection = connectionField.get(serverPlayer);
+            Method sendMethod = connection.getClass().getMethod("send", Class.forName("net.minecraft.network.protocol.Packet"));
+            sendMethod.invoke(connection, packet);
+        } catch (Throwable ignored) {
+            player.updateInventory();
+        }
+    }
+
+    public static void sendDirectCursorUpdate(Player player) {
+        if (player == null || !player.isOnline()) return;
+        try {
+            Class<?> craftPlayerClass = Class.forName("org.bukkit.craftbukkit.entity.CraftPlayer");
+            Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
+            Object craftPlayer = craftPlayerClass.cast(player);
+            Method getHandle = craftPlayerClass.getMethod("getHandle");
+            Object serverPlayer = getHandle.invoke(craftPlayer);
+
+            Field containerMenuField = serverPlayer.getClass().getField("containerMenu");
+            Object containerMenu = containerMenuField.get(serverPlayer);
+
+            Method getStateId = containerMenu.getClass().getMethod("getStateId");
+            int stateId = (int) getStateId.invoke(containerMenu);
+
+            ItemStack cursor = player.getItemOnCursor();
+            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
+            Object nmsItem = asNMSCopy.invoke(null, cursor == null ? new ItemStack(Material.AIR) : cursor);
+
+            Class<?> setSlotPacketClass = Class.forName("net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket");
+            Object packet = setSlotPacketClass.getConstructor(int.class, int.class, int.class, Class.forName("net.minecraft.world.item.ItemStack"))
+                    .newInstance(-1, stateId, -1, nmsItem);
+
+            Field connectionField = serverPlayer.getClass().getField("connection");
+            Object connection = connectionField.get(serverPlayer);
+            Method sendMethod = connection.getClass().getMethod("send", Class.forName("net.minecraft.network.protocol.Packet"));
+            sendMethod.invoke(connection, packet);
+        } catch (Throwable ignored) {
+            player.updateInventory();
+        }
+    }
+
+    private void syncBackpackSlot(Player player, Inventory top, int raw) {
+        ItemStack item = top.getItem(raw);
+        sendDirectSlotUpdate(player, raw, item);
+        sendDirectCursorUpdate(player);
+        player.updateInventory();
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (player.isOnline() && player.getOpenInventory().getTopInventory().equals(top)) {
+                ItemStack cur = top.getItem(raw);
+                sendDirectSlotUpdate(player, raw, cur);
+                sendDirectCursorUpdate(player);
+                player.updateInventory();
+            }
+        });
     }
 }
