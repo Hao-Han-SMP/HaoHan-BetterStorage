@@ -18,6 +18,9 @@ import org.bukkit.util.Transformation;
 import org.joml.Vector3f;
 import org.joml.Quaternionf;
 import org.bukkit.Color;
+import org.bukkit.Sound;
+import org.bukkit.Particle;
+import org.bukkit.block.data.Levelled;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.ItemFlag;
@@ -113,8 +116,7 @@ public final class BackpackService {
                 org.bukkit.inventory.ShapelessRecipe recipe = new org.bukkit.inventory.ShapelessRecipe(key, dyedBackpack);
                 recipe.setGroup("haohan_backpack_dye");
                 recipe.setCategory(org.bukkit.inventory.recipe.CraftingBookCategory.EQUIPMENT);
-                ItemStack ingredientBackpack = createBackpackItem();
-                recipe.addIngredient(new org.bukkit.inventory.RecipeChoice.ExactChoice(ingredientBackpack));
+                recipe.addIngredient(Material.BROWN_DYE);
                 recipe.addIngredient(dyeMat);
                 plugin.getServer().addRecipe(recipe);
             } catch (Throwable ignored) { }
@@ -983,6 +985,99 @@ public final class BackpackService {
             }
         } catch (Throwable ignored) {
             // NMS reflection failsafe
+        }
+    }
+
+    public void removeDyedColorComponent(ItemStack item) {
+        if (item == null || item.getType().isAir()) return;
+        try {
+            Class<?> craftItemStackClass = Class.forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
+            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
+            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy", Class.forName("net.minecraft.world.item.ItemStack"));
+
+            Object nmsStack = asNMSCopy.invoke(null, item);
+            if (nmsStack == null) return;
+
+            Class<?> dataComponentsClass = Class.forName("net.minecraft.core.component.DataComponents");
+            Object dyedColorComponentKey = dataComponentsClass.getField("DYED_COLOR").get(null);
+
+            Method removeMethod = nmsStack.getClass().getMethod("remove", Class.forName("net.minecraft.core.component.DataComponentType"));
+            removeMethod.invoke(nmsStack, dyedColorComponentKey);
+
+            ItemStack result = (ItemStack) asBukkitCopy.invoke(null, nmsStack);
+            if (result != null && result.hasItemMeta()) {
+                item.setItemMeta(result.getItemMeta());
+            }
+        } catch (Throwable ignored) {
+            // NMS reflection failsafe
+        }
+    }
+
+    public boolean clearBackpackColor(ItemStack item) {
+        if (item == null || item.getType().isAir()) return false;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return false;
+        if (!meta.getPersistentDataContainer().has(colorKey, PersistentDataType.INTEGER)) {
+            return false;
+        }
+        meta.getPersistentDataContainer().remove(colorKey);
+        if (meta instanceof LeatherArmorMeta leatherMeta) {
+            leatherMeta.setColor(null);
+        }
+        applyBackpackMeta(meta);
+        updateBackpackLore(meta, null);
+        item.setItemMeta(meta);
+        removeDyedColorComponent(item);
+        return true;
+    }
+
+    public boolean consumeCauldronLevel(Block block) {
+        if (block.getType() != Material.WATER_CAULDRON) return false;
+        if (!(block.getBlockData() instanceof Levelled levelled)) return false;
+
+        int currentLevel = levelled.getLevel();
+        if (currentLevel > 1) {
+            levelled.setLevel(currentLevel - 1);
+            block.setBlockData(levelled);
+        } else {
+            block.setType(Material.CAULDRON);
+        }
+
+        Location loc = block.getLocation().add(0.5, 0.5, 0.5);
+        block.getWorld().playSound(loc, Sound.ITEM_BUCKET_EMPTY, 1.0f, 1.2f);
+        block.getWorld().playSound(loc, Sound.ENTITY_GENERIC_SPLASH, 0.8f, 1.4f);
+        block.getWorld().spawnParticle(Particle.SPLASH, block.getLocation().add(0.5, 0.75, 0.5), 18, 0.2, 0.1, 0.2, 0.1);
+        return true;
+    }
+
+    public void checkItemInCauldron(org.bukkit.entity.Item itemEntity) {
+        if (itemEntity == null || !itemEntity.isValid() || itemEntity.isDead()) return;
+        ItemStack stack = itemEntity.getItemStack();
+        if (!isBackpack(stack)) return;
+        if (getBackpackColor(stack) == null) return;
+
+        Block block = itemEntity.getLocation().getBlock();
+        if (block.getType() != Material.WATER_CAULDRON) {
+            block = itemEntity.getLocation().clone().add(0, -0.1, 0).getBlock();
+            if (block.getType() != Material.WATER_CAULDRON) return;
+        }
+
+        if (!consumeCauldronLevel(block)) return;
+
+        ItemStack uncolored = stack.clone();
+        clearBackpackColor(uncolored);
+        itemEntity.setItemStack(uncolored);
+    }
+
+    public void checkCauldrons() {
+        for (org.bukkit.World world : plugin.getServer().getWorlds()) {
+            for (org.bukkit.entity.Item itemEntity : world.getEntitiesByClass(org.bukkit.entity.Item.class)) {
+                if (!itemEntity.isValid() || itemEntity.isDead()) continue;
+                ItemStack stack = itemEntity.getItemStack();
+                if (isBackpack(stack) && getBackpackColor(stack) != null) {
+                    checkItemInCauldron(itemEntity);
+                }
+            }
         }
     }
 

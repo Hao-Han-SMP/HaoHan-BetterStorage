@@ -80,7 +80,8 @@ public final class BackpackListener implements Listener {
         }
 
         if (backpackCount != 1 || dyes.isEmpty() || nonAirCount != (1 + dyes.size())) {
-            if (backpackCount > 0) {
+            ItemStack res = inv.getResult();
+            if (res != null && service.isBackpack(res)) {
                 inv.setResult(null);
             }
             return;
@@ -122,9 +123,15 @@ public final class BackpackListener implements Listener {
             }
         }
 
-        if (backpack == null || !hasDye) return;
-
         ItemStack result = inv.getResult();
+
+        if (backpack == null || !hasDye) {
+            if (result != null && service.isBackpack(result)) {
+                event.setCancelled(true);
+            }
+            return;
+        }
+
         if (result == null || result.getType().isAir() || !service.isBackpack(result)) {
             event.setCancelled(true);
             return;
@@ -229,7 +236,19 @@ public final class BackpackListener implements Listener {
 
         Player player = event.getPlayer();
 
-        // 1. Sneak + Right click BLOCK -> PLACE BACKPACK ON GROUND
+        // 1. Right click WATER_CAULDRON -> BLEACH / CLEAR BACKPACK COLOR
+        if (event.getAction() == Action.RIGHT_CLICK_BLOCK && event.getClickedBlock() != null && event.getClickedBlock().getType() == Material.WATER_CAULDRON) {
+            if (service.getBackpackColor(event.getItem()) != null) {
+                event.setCancelled(true);
+                if (service.consumeCauldronLevel(event.getClickedBlock())) {
+                    service.clearBackpackColor(event.getItem());
+                    player.updateInventory();
+                }
+                return;
+            }
+        }
+
+        // 2. Sneak + Right click BLOCK -> PLACE BACKPACK ON GROUND
         if (event.getAction() == Action.RIGHT_CLICK_BLOCK && player.isSneaking()) {
             Block clicked = event.getClickedBlock();
             Block target = clicked == null ? null : clicked.getRelative(event.getBlockFace());

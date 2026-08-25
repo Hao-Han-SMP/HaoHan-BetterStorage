@@ -23,6 +23,7 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new BackpackListener(this, backpackService), this);
 
         getServer().getScheduler().runTaskTimer(this, () -> getServer().getOnlinePlayers().forEach(backpackService::updateWornBackpack), 20L, 20L);
+        getServer().getScheduler().runTaskTimer(this, backpackService::checkCauldrons, 5L, 5L);
         getServer().getOnlinePlayers().forEach(backpackService::discoverRecipes);
 
         getLogger().info("HaoHanBackpack enabled (54 storage slots)");
