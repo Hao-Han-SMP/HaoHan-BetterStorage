@@ -22,14 +22,30 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.block.Block;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.GameMode;
+import org.bukkit.event.entity.EntityDismountEvent;
+import org.bukkit.event.inventory.InventoryCreativeEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.Sound;
+import org.bukkit.Color;
+import org.bukkit.DyeColor;
+import org.bukkit.Material;
+import org.bukkit.event.inventory.PrepareItemCraftEvent;
+import org.bukkit.inventory.CraftingInventory;
+import org.bukkit.inventory.meta.LeatherArmorMeta;
+import org.bukkit.event.inventory.InventoryAction;
+import org.bukkit.event.inventory.ClickType;
 import vn.haohan.backpack.gui.BackpackHolder;
 import vn.haohan.backpack.service.BackpackService;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.inventory.CraftItemEvent;
 
 public final class BackpackListener implements Listener {
     private final Plugin plugin;
@@ -40,6 +56,170 @@ public final class BackpackListener implements Listener {
         this.service = service;
     }
 
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPrepareCraft(PrepareItemCraftEvent event) {
+        CraftingInventory inv = event.getInventory();
+        ItemStack[] matrix = inv.getMatrix();
+        ItemStack backpack = null;
+        int backpackCount = 0;
+        List<DyeColor> dyes = new ArrayList<>();
+        int nonAirCount = 0;
+
+        for (ItemStack item : matrix) {
+            if (item == null || item.getType().isAir()) continue;
+            nonAirCount++;
+            if (service.isBackpack(item)) {
+                backpackCount++;
+                backpack = item;
+            } else {
+                DyeColor dyeColor = getDyeColor(item.getType());
+                if (dyeColor != null) {
+                    dyes.add(dyeColor);
+                }
+            }
+        }
+
+        if (backpackCount != 1 || dyes.isEmpty() || nonAirCount != (1 + dyes.size())) {
+            if (backpackCount > 0) {
+                inv.setResult(null);
+            }
+            return;
+        }
+
+        Color newColor = blendDyeColors(dyes);
+        Integer currentRgb = service.getBackpackColor(backpack);
+        String newDyeName = BackpackService.getClosestDyeColorName(newColor.asRGB());
+
+        if (currentRgb != null) {
+            String currentDyeName = BackpackService.getClosestDyeColorName(currentRgb);
+            if (currentDyeName.equalsIgnoreCase(newDyeName) || currentRgb.intValue() == newColor.asRGB()) {
+                inv.setResult(null);
+                return;
+            }
+        }
+
+        ItemStack result = backpack.clone();
+        result.setAmount(1);
+
+        service.setBackpackColor(result, newColor.asRGB());
+        inv.setResult(result);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onCraftItem(CraftItemEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        CraftingInventory inv = event.getInventory();
+        ItemStack[] matrix = inv.getMatrix();
+        ItemStack backpack = null;
+        boolean hasDye = false;
+
+        for (ItemStack item : matrix) {
+            if (item == null || item.getType().isAir()) continue;
+            if (service.isBackpack(item)) {
+                backpack = item;
+            } else if (getDyeColor(item.getType()) != null) {
+                hasDye = true;
+            }
+        }
+
+        if (backpack == null || !hasDye) return;
+
+        ItemStack result = inv.getResult();
+        if (result == null || result.getType().isAir() || !service.isBackpack(result)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        Integer currentRgb = service.getBackpackColor(backpack);
+        Integer resultRgb = service.getBackpackColor(result);
+        if (currentRgb != null && resultRgb != null && currentRgb.equals(resultRgb)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        // Play equip sound on successful dye craft
+        player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
+    }
+
+    private DyeColor getDyeColor(Material material) {
+        String name = material.name();
+        if (name.endsWith("_DYE")) {
+            String colorName = name.substring(0, name.length() - 4);
+            try {
+                return DyeColor.valueOf(colorName);
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private Color blendDyeColors(List<DyeColor> dyes) {
+        if (dyes.isEmpty()) return Color.fromRGB(176, 46, 38);
+        if (dyes.size() == 1) return dyes.get(0).getColor();
+
+        int rSum = 0, gSum = 0, bSum = 0;
+        int maxColorSum = 0;
+        int count = 0;
+
+        for (DyeColor dye : dyes) {
+            Color c = dye.getColor();
+            rSum += c.getRed();
+            gSum += c.getGreen();
+            bSum += c.getBlue();
+            maxColorSum += Math.max(c.getRed(), Math.max(c.getGreen(), c.getBlue()));
+            count++;
+        }
+
+        int rAvg = rSum / count;
+        int gAvg = gSum / count;
+        int bAvg = bSum / count;
+
+        float maxAvg = (float) maxColorSum / (float) count;
+        float currentMax = (float) Math.max(rAvg, Math.max(gAvg, bAvg));
+
+        if (currentMax > 0) {
+            rAvg = (int) ((float) rAvg * maxAvg / currentMax);
+            gAvg = (int) ((float) gAvg * maxAvg / currentMax);
+            bAvg = (int) ((float) bAvg * maxAvg / currentMax);
+        }
+
+        return Color.fromRGB(
+                Math.min(255, Math.max(0, rAvg)),
+                Math.min(255, Math.max(0, gAvg)),
+                Math.min(255, Math.max(0, bAvg))
+        );
+    }
+
+    @EventHandler public void onDismount(EntityDismountEvent event) {
+        if (service.isWornBackpack(event.getEntity())) {
+            event.setCancelled(true);
+        }
+    }
+
+    private boolean isChestplateSlot(InventoryClickEvent event) {
+        if (event.getSlotType() != InventoryType.SlotType.ARMOR) {
+            return false;
+        }
+        if (event.getClickedInventory() != null && event.getClickedInventory().getType() == InventoryType.PLAYER) {
+            return event.getSlot() == 38;
+        }
+        if (event.getView().getType() == InventoryType.CRAFTING) {
+            return event.getRawSlot() == 6;
+        }
+        return event.getSlot() == 38;
+    }
+
+    @EventHandler public void onCreativeClick(InventoryCreativeEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        if (isChestplateSlot(event)) {
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                service.updateWornBackpack(player);
+                player.updateInventory();
+            });
+        }
+    }
+
     @EventHandler public void onUse(PlayerInteractEvent event) {
         if (event.getHand() != EquipmentSlot.HAND || (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK)) return;
         if (event.getAction() == Action.RIGHT_CLICK_BLOCK && event.getClickedBlock() != null && service.isPlacedBackpack(event.getClickedBlock())) {
@@ -48,39 +228,23 @@ public final class BackpackListener implements Listener {
         if (!service.isBackpack(event.getItem())) return;
 
         Player player = event.getPlayer();
-        // If chestplate is empty and player right-clicks air or right-clicks without sneaking, equip to chestplate
-        if (player.getInventory().getChestplate() == null) {
-            if (event.getAction() == Action.RIGHT_CLICK_AIR || !player.isSneaking()) {
-                event.setCancelled(true);
-                ItemStack equip = event.getItem().clone();
-                equip.setAmount(1);
-                player.getInventory().setChestplate(equip);
-                if (event.getItem().getAmount() > 1) {
-                    event.getItem().setAmount(event.getItem().getAmount() - 1);
-                } else {
-                    player.getInventory().setItem(event.getHand(), null);
-                }
-                player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
-                service.updateWornBackpack(player);
-                return;
-            }
-        }
 
-        if (event.getAction() == Action.RIGHT_CLICK_BLOCK) {
-            if (!event.getPlayer().isSneaking()) {
-                event.setCancelled(true);
-                service.openItem(event.getPlayer(), event.getItem());
-                return;
-            }
+        // 1. Sneak + Right click BLOCK -> PLACE BACKPACK ON GROUND
+        if (event.getAction() == Action.RIGHT_CLICK_BLOCK && player.isSneaking()) {
             Block clicked = event.getClickedBlock();
             Block target = clicked == null ? null : clicked.getRelative(event.getBlockFace());
             if (target == null || !target.getType().isAir() || service.hasPlacedBackpackAt(target)) return;
             event.setCancelled(true);
             service.spawnPlacedBackpack(target, event.getItem().clone(), event.getPlayer().getLocation().getYaw());
-            event.getItem().setAmount(event.getItem().getAmount() - 1);
+            if (player.getGameMode() != GameMode.CREATIVE) {
+                event.getItem().setAmount(event.getItem().getAmount() - 1);
+            }
             return;
         }
-        event.setCancelled(true); service.openItem(event.getPlayer(), event.getItem());
+
+        // 2. All other right clicks (air with/without sneak, or block without sneak) -> OPEN BACKPACK GUI
+        event.setCancelled(true);
+        service.openItem(player, event.getItem());
     }
 
     @EventHandler public void onPlace(BlockPlaceEvent event) {
@@ -152,17 +316,25 @@ public final class BackpackListener implements Listener {
     @EventHandler public void onClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) return;
 
+        // In Creative Mode: let the creative client handle slot/cursor management.
+        // If the player changes their chestplate slot in creative mode, simply update the worn visual.
+        if (event instanceof InventoryCreativeEvent) {
+            if (isChestplateSlot(event)) {
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    service.updateWornBackpack(player);
+                    player.updateInventory();
+                });
+            }
+            return;
+        }
+
         ItemStack cursor = player.getItemOnCursor();
         if ((cursor == null || cursor.getType().isAir()) && event.getCursor() != null && !event.getCursor().getType().isAir()) {
             cursor = event.getCursor();
         }
         ItemStack currentItem = event.getCurrentItem();
 
-        boolean isChestSlot = (event.getRawSlot() == 6)
-                           || (event.getSlot() == 38)
-                           || (event.getSlot() == 6 && event.getSlotType() == InventoryType.SlotType.ARMOR)
-                           || (event.getSlotType() == InventoryType.SlotType.ARMOR && (event.getRawSlot() == 6 || event.getSlot() == 38 || event.getSlot() == 6))
-                           || (event.getClickedInventory() != null && event.getClickedInventory().getType() == InventoryType.PLAYER && event.getSlot() == 38);
+        boolean isChestSlot = isChestplateSlot(event);
 
         // 1. Direct click on chestplate slot with a backpack on cursor (Equip)
         if (isChestSlot && service.isBackpack(cursor)) {
@@ -171,6 +343,15 @@ public final class BackpackListener implements Listener {
             toEquip.setAmount(1);
             ItemStack currentChest = player.getInventory().getChestplate();
             player.getInventory().setChestplate(toEquip);
+
+            if (player.getGameMode() == GameMode.CREATIVE) {
+                player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    service.updateWornBackpack(player);
+                    player.updateInventory();
+                });
+                return;
+            }
 
             if (cursor.getAmount() > 1) {
                 cursor.setAmount(cursor.getAmount() - 1);
@@ -182,7 +363,10 @@ public final class BackpackListener implements Listener {
             }
 
             player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
-            plugin.getServer().getScheduler().runTask(plugin, () -> service.updateWornBackpack(player));
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                service.updateWornBackpack(player);
+                player.updateInventory();
+            });
             return;
         }
 
@@ -191,10 +375,15 @@ public final class BackpackListener implements Listener {
             event.setCancelled(true);
             ItemStack chest = currentItem.clone();
             player.getInventory().setChestplate(null);
-            player.setItemOnCursor(chest);
-            event.getView().setCursor(chest);
+            if (player.getGameMode() != GameMode.CREATIVE) {
+                player.setItemOnCursor(chest);
+                event.getView().setCursor(chest);
+            }
             player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
-            plugin.getServer().getScheduler().runTask(plugin, () -> service.updateWornBackpack(player));
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                service.updateWornBackpack(player);
+                player.updateInventory();
+            });
             return;
         }
 
@@ -205,27 +394,70 @@ public final class BackpackListener implements Listener {
                 ItemStack equip = currentItem.clone();
                 equip.setAmount(1);
                 player.getInventory().setChestplate(equip);
-                if (currentItem.getAmount() > 1) {
-                    currentItem.setAmount(currentItem.getAmount() - 1);
-                } else {
-                    event.setCurrentItem(null);
+                if (player.getGameMode() != GameMode.CREATIVE) {
+                    if (currentItem.getAmount() > 1) {
+                        currentItem.setAmount(currentItem.getAmount() - 1);
+                    } else {
+                        event.setCurrentItem(null);
+                    }
                 }
                 player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
-                plugin.getServer().getScheduler().runTask(plugin, () -> service.updateWornBackpack(player));
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    service.updateWornBackpack(player);
+                    player.updateInventory();
+                });
                 return;
             }
         }
 
-        plugin.getServer().getScheduler().runTask(plugin, () -> service.updateWornBackpack(player));
+        Inventory top = event.getView().getTopInventory();
+        boolean isTopShulker = top.getType() == InventoryType.SHULKER_BOX;
 
-        if (!(event.getView().getTopInventory().getHolder() instanceof BackpackHolder)) {
-            boolean externalContainer = event.getView().getTopInventory().getType() != InventoryType.CRAFTING;
-            if (externalContainer && service.blockBackpackInContainers() && (service.isBackpack(event.getCurrentItem()) || service.isBackpack(event.getCursor()))) event.setCancelled(true);
+        // Block placing/storing backpacks inside Shulker Boxes
+        if (isTopShulker && service.blockBackpackInContainers()) {
+            boolean isTopClick = event.getClickedInventory() == top;
+
+            // Direct click or drop backpack into shulker box
+            if (isTopClick && service.isBackpack(cursor)) {
+                event.setCancelled(true);
+                return;
+            }
+
+            // Shift-click backpack from inventory into shulker box
+            if (event.isShiftClick() && service.isBackpack(currentItem)) {
+                event.setCancelled(true);
+                return;
+            }
+
+            // Hotbar number key swap (1-9) into shulker box slot
+            if (isTopClick && event.getHotbarButton() >= 0) {
+                ItemStack hotbarItem = player.getInventory().getItem(event.getHotbarButton());
+                if (service.isBackpack(hotbarItem)) {
+                    event.setCancelled(true);
+                    return;
+                }
+            }
+
+            // Offhand swap key (F) into shulker box slot
+            if (isTopClick && event.getClick() == ClickType.SWAP_OFFHAND) {
+                if (service.isBackpack(player.getInventory().getItemInOffHand())) {
+                    event.setCancelled(true);
+                    return;
+                }
+            }
+
+            // Double click collect to cursor
+            if (event.getAction() == InventoryAction.COLLECT_TO_CURSOR && service.isBackpack(cursor)) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+
+        if (!(top.getHolder() instanceof BackpackHolder)) {
             return;
         }
 
         int raw = event.getRawSlot();
-        Inventory top = event.getView().getTopInventory();
         boolean isTop = raw >= 0 && raw < top.getSize();
 
         // Prevent clicking/interacting with non-storage decorative slots (e.g. module slot 47)
@@ -312,12 +544,36 @@ public final class BackpackListener implements Listener {
         if (event.getWhoClicked() instanceof Player player) {
             plugin.getServer().getScheduler().runTask(plugin, () -> service.updateWornBackpack(player));
         }
-        if (!(event.getView().getTopInventory().getHolder() instanceof BackpackHolder)) return;
-        if (event.getRawSlots().stream().anyMatch(slot -> slot < event.getView().getTopInventory().getSize() && !isStorage(slot))) event.setCancelled(true);
-        if (!event.isCancelled() && (service.isBlocked(event.getOldCursor()) || (service.isBackpack(event.getOldCursor()) && !service.allowBackpacksInsideBackpacks()))) event.setCancelled(true);
+
+        Inventory top = event.getView().getTopInventory();
+        boolean isTopBackpack = top.getHolder() instanceof BackpackHolder;
+        boolean isTopShulker = top.getType() == InventoryType.SHULKER_BOX;
+
+        // Block dragging backpack into Shulker Boxes
+        if (isTopShulker && service.blockBackpackInContainers() && service.isBackpack(event.getOldCursor())) {
+            if (event.getRawSlots().stream().anyMatch(slot -> slot < top.getSize())) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+
+        if (!isTopBackpack) return;
+
+        if (event.getRawSlots().stream().anyMatch(slot -> slot < event.getView().getTopInventory().getSize() && !isStorage(slot))) {
+            event.setCancelled(true);
+        }
+        if (!event.isCancelled() && (service.isBlocked(event.getOldCursor()) || (service.isBackpack(event.getOldCursor()) && !service.allowBackpacksInsideBackpacks()))) {
+            event.setCancelled(true);
+        }
     }
 
     @EventHandler public void onHopperMove(InventoryMoveItemEvent event) {
+        // Block hopper moving backpack into a Shulker Box
+        if (event.getDestination().getType() == InventoryType.SHULKER_BOX && service.blockBackpackInContainers() && service.isBackpack(event.getItem())) {
+            event.setCancelled(true);
+            return;
+        }
+
         if (!service.hopperEnabled()) return;
         boolean destinationBackpack = service.isPlacedBackpackInventory(event.getDestination());
         boolean sourceBackpack = service.isPlacedBackpackInventory(event.getSource());
@@ -351,7 +607,10 @@ public final class BackpackListener implements Listener {
         service.removeWornBackpack(event.getPlayer());
     }
     @EventHandler public void onJoin(PlayerJoinEvent event) {
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> service.updateWornBackpack(event.getPlayer()), 5L);
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            service.updateWornBackpack(event.getPlayer());
+            service.discoverRecipes(event.getPlayer());
+        }, 5L);
     }
     @EventHandler public void onTeleport(PlayerTeleportEvent event) {
         service.removeWornBackpack(event.getPlayer());

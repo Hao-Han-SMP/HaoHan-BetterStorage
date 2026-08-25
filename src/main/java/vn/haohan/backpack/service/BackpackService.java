@@ -17,9 +17,12 @@ import org.bukkit.entity.Interaction;
 import org.bukkit.util.Transformation;
 import org.joml.Vector3f;
 import org.joml.Quaternionf;
+import org.bukkit.Color;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.LeatherArmorMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.util.io.BukkitObjectInputStream;
@@ -50,6 +53,7 @@ public final class BackpackService {
     private final NamespacedKey visualKey;
     private final NamespacedKey visualIdKey;
     private final NamespacedKey wornKey;
+    private final NamespacedKey colorKey;
     private final Map<UUID, Inventory> open = new HashMap<>();
     private final File dataFolder;
     private final SqliteStore database;
@@ -59,6 +63,7 @@ public final class BackpackService {
         this.placedKey = new NamespacedKey(plugin, "placed_backpack"); this.placedIdKey = new NamespacedKey(plugin, "placed_backpack_id"); this.contentsKey = new NamespacedKey(plugin, "backpack_contents");
         this.visualKey = new NamespacedKey(plugin, "backpack_visual"); this.visualIdKey = new NamespacedKey(plugin, "backpack_visual_id");
         this.wornKey = new NamespacedKey(plugin, "worn_backpack");
+        this.colorKey = new NamespacedKey(plugin, "backpack_color");
         this.dataFolder = new File(plugin.getDataFolder(), "backpacks"); dataFolder.mkdirs();
         SqliteStore store;
         try { store = new SqliteStore(plugin.getDataFolder()); }
@@ -67,21 +72,166 @@ public final class BackpackService {
     }
 
     public void registerItemCoreDefinition() {
+        initDyedTexturesAndModels();
         if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") == null) return;
         try {
             var core = vn.haohan.itemcore.api.HaoHanItemCore.get();
             if (!core.getItemService().exists("haohan:backpack")) {
                 core.getItemRegistry().register(vn.haohan.itemcore.api.item.ItemDefinition.builder("haohan:backpack")
-                        // Do not use CHEST as the carrier item: Punchy intercepts
-                        // every chest BlockItem before rendering its item_model.
-                        .material(Material.BROWN_DYE).displayName("&b&lBa lô thám hiểm").maxStackSize(1)
+                        .material(Material.BROWN_DYE).displayName("Backpack").maxStackSize(1)
                         .type(vn.haohan.itemcore.api.item.ItemType.SPECIAL).model("haohan:backpack")
                         .addLore("&7Chuột phải để mở ba lô cá nhân.").addLore("&8Dung lượng: 53 ô + 1 module").build());
             }
+
+            for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+                String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
+                String id = "haohan:backpack_" + colorName;
+                if (!core.getItemService().exists(id)) {
+                    core.getItemRegistry().register(vn.haohan.itemcore.api.item.ItemDefinition.builder(id)
+                            .material(Material.BROWN_DYE).displayName("Backpack").maxStackSize(1)
+                            .type(vn.haohan.itemcore.api.item.ItemType.SPECIAL).model(id)
+                            .addLore("&7Chuột phải để mở ba lô cá nhân.").addLore("&8Dung lượng: 53 ô + 1 module").build());
+                }
+            }
         } catch (Throwable ex) {
-            // ItemCore is optional; an incompatible/missing API must not prevent the fallback item from working.
             if (plugin.getConfig().getBoolean("debug", false)) plugin.getLogger().info("ItemCore không khả dụng, dùng item fallback: " + ex.getClass().getSimpleName());
         }
+    }
+
+    public void registerDyeRecipes() {
+        for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+            String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
+            NamespacedKey key = new NamespacedKey(plugin, "dye_backpack_" + colorName);
+            try {
+                plugin.getServer().removeRecipe(key);
+            } catch (Throwable ignored) { }
+            try {
+                ItemStack dyedBackpack = createBackpackItem();
+                setBackpackColor(dyedBackpack, dye.getColor().asRGB());
+
+                Material dyeMat = Material.valueOf(dye.name() + "_DYE");
+                org.bukkit.inventory.ShapelessRecipe recipe = new org.bukkit.inventory.ShapelessRecipe(key, dyedBackpack);
+                recipe.setGroup("haohan_backpack_dye");
+                recipe.setCategory(org.bukkit.inventory.recipe.CraftingBookCategory.EQUIPMENT);
+                ItemStack ingredientBackpack = createBackpackItem();
+                recipe.addIngredient(new org.bukkit.inventory.RecipeChoice.ExactChoice(ingredientBackpack));
+                recipe.addIngredient(dyeMat);
+                plugin.getServer().addRecipe(recipe);
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    public void discoverRecipes(Player player) {
+        if (player == null || !player.isOnline()) return;
+        List<NamespacedKey> keys = new ArrayList<>();
+        for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+            keys.add(new NamespacedKey(plugin, "dye_backpack_" + dye.name().toLowerCase(java.util.Locale.ROOT)));
+        }
+        try {
+            player.discoverRecipes(keys);
+        } catch (Throwable ignored) { }
+    }
+
+    public void initDyedTexturesAndModels() {
+        java.awt.image.BufferedImage baseImage = null;
+        try (var in = plugin.getResource("backpack.png")) {
+            if (in != null) {
+                baseImage = javax.imageio.ImageIO.read(in);
+            }
+        } catch (Throwable ignored) { }
+
+        if (baseImage == null) {
+            File localImg = new File(plugin.getDataFolder(), "backpack.png");
+            if (localImg.exists()) {
+                try { baseImage = javax.imageio.ImageIO.read(localImg); } catch (Throwable ignored) { }
+            }
+        }
+
+        if (baseImage == null) {
+            File rpImg = new File("F:/.HaoHanProject/HaoHan-Resourcepack/assets/haohan/textures/block/backpack.png");
+            if (rpImg.exists()) {
+                try { baseImage = javax.imageio.ImageIO.read(rpImg); } catch (Throwable ignored) { }
+            }
+        }
+
+        if (baseImage == null) return;
+
+        // Register in ItemCore if available
+        if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") != null) {
+            try {
+                var core = vn.haohan.itemcore.api.HaoHanItemCore.get();
+                var registry = core.getIconTextureRegistry();
+                if (registry.get("haohan:backpack").isEmpty()) {
+                    registry.register("haohan:backpack", new vn.haohan.itemcore.api.texture.IconTexture("haohan:backpack", baseImage));
+                }
+                for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+                    String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
+                    String id = "haohan:backpack_" + colorName;
+                    if (registry.get(id).isEmpty()) {
+                        java.awt.image.BufferedImage shifted = shiftHueImage(baseImage, dye.getColor().asRGB());
+                        if (shifted != null) {
+                            registry.register(id, new vn.haohan.itemcore.api.texture.IconTexture(id, shifted));
+                        }
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+
+        // Export to Resourcepack workspace directory if present
+        try {
+            File rpDir = new File("F:/.HaoHanProject/HaoHan-Resourcepack");
+            if (rpDir.exists() && rpDir.isDirectory()) {
+                File texturesDir = new File(rpDir, "assets/haohan/textures/block");
+                File modelsDir = new File(rpDir, "assets/haohan/models/item");
+                File itemsDir = new File(rpDir, "assets/haohan/items");
+                File blockModelsDir = new File(rpDir, "assets/haohan/models/block");
+                texturesDir.mkdirs(); modelsDir.mkdirs(); itemsDir.mkdirs(); blockModelsDir.mkdirs();
+
+                File baseModelFile = new File(modelsDir, "backpack.json");
+                String baseModelContent = baseModelFile.exists() ? java.nio.file.Files.readString(baseModelFile.toPath()) : null;
+
+                File normalMap = new File(texturesDir, "backpack_n.png");
+                File specularMap = new File(texturesDir, "backpack_s.png");
+
+                for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+                    String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
+                    File texFile = new File(texturesDir, "backpack_" + colorName + ".png");
+                    if (!texFile.exists()) {
+                        java.awt.image.BufferedImage shifted = shiftHueImage(baseImage, dye.getColor().asRGB());
+                        if (shifted != null) {
+                            javax.imageio.ImageIO.write(shifted, "PNG", texFile);
+                        }
+                    }
+
+                    if (normalMap.exists()) {
+                        File normOut = new File(texturesDir, "backpack_" + colorName + "_n.png");
+                        if (!normOut.exists()) java.nio.file.Files.copy(normalMap.toPath(), normOut.toPath());
+                    }
+                    if (specularMap.exists()) {
+                        File specOut = new File(texturesDir, "backpack_" + colorName + "_s.png");
+                        if (!specOut.exists()) java.nio.file.Files.copy(specularMap.toPath(), specOut.toPath());
+                    }
+
+                    File modelFile = new File(modelsDir, "backpack_" + colorName + ".json");
+                    if (!modelFile.exists() && baseModelContent != null) {
+                        String json = baseModelContent.replace("\"haohan:block/backpack\"", "\"haohan:block/backpack_" + colorName + "\"");
+                        java.nio.file.Files.writeString(modelFile.toPath(), json);
+                    }
+
+                    File itemFile = new File(itemsDir, "backpack_" + colorName + ".json");
+                    if (!itemFile.exists()) {
+                        String json = "{\n  \"model\": {\n    \"type\": \"minecraft:model\",\n    \"model\": \"haohan:item/backpack_" + colorName + "\"\n  }\n}";
+                        java.nio.file.Files.writeString(itemFile.toPath(), json);
+                    }
+
+                    File blockModelFile = new File(blockModelsDir, "backpack_" + colorName + ".json");
+                    if (!blockModelFile.exists()) {
+                        String json = "{\n  \"parent\": \"haohan:item/backpack_" + colorName + "\"\n}";
+                        java.nio.file.Files.writeString(blockModelFile.toPath(), json);
+                    }
+                }
+            }
+        } catch (Throwable ignored) { }
     }
 
     public ItemStack createBackpackItem() {
@@ -102,7 +252,7 @@ public final class BackpackService {
             }
         } catch (Throwable ignored) { }
         ItemStack item = new ItemStack(Material.BROWN_DYE); ItemMeta meta = item.getItemMeta();
-        meta.displayName(component("&b&lBa lô thám hiểm"));
+        meta.displayName(component(plugin.getConfig().getString("backpack-item-name", "Backpack")));
         meta.lore(List.of(component("&7Chuột phải để mở ba lô cá nhân."), component("&8Dung lượng: 53 ô + 1 module")));
         applyBackpackMeta(meta);
         meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
@@ -116,8 +266,25 @@ public final class BackpackService {
      * packs such as Hyper Punchy can otherwise fall back to the CHEST model.
      */
     private void applyBackpackMeta(ItemMeta meta) {
-        meta.setItemModel(NamespacedKey.fromString(plugin.getConfig().getString("backpack-item-model", "haohan:backpack")));
+        String modelName = "haohan:backpack";
+        if (meta.getPersistentDataContainer().has(colorKey, PersistentDataType.INTEGER)) {
+            int rgb = meta.getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
+            modelName = "haohan:backpack_" + getClosestDyeColorName(rgb);
+        } else {
+            modelName = plugin.getConfig().getString("backpack-item-model", "haohan:backpack");
+        }
+        meta.setItemModel(NamespacedKey.fromString(modelName));
         meta.setMaxStackSize(1);
+        meta.setUnbreakable(true);
+        meta.addItemFlags(
+                ItemFlag.HIDE_ATTRIBUTES,
+                ItemFlag.HIDE_ADDITIONAL_TOOLTIP,
+                ItemFlag.HIDE_UNBREAKABLE,
+                ItemFlag.HIDE_ARMOR_TRIM,
+                ItemFlag.HIDE_STORED_ENCHANTS,
+                ItemFlag.HIDE_ENCHANTS,
+                ItemFlag.HIDE_DYE
+        );
     }
 
     public boolean isBackpack(ItemStack item) {
@@ -657,6 +824,168 @@ public final class BackpackService {
         }
     }
 
+    /**
+     * Shifts the hue and tints a BufferedImage based on a target RGB color.
+     * This creates dyed variants dynamically from a single base texture without redrawing.
+     */
+    public static java.awt.image.BufferedImage shiftHueImage(java.awt.image.BufferedImage source, int targetRgb) {
+        if (source == null) return null;
+        int width = source.getWidth();
+        int height = source.getHeight();
+        java.awt.image.BufferedImage result = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+
+        float[] targetHsb = java.awt.Color.RGBtoHSB((targetRgb >> 16) & 0xFF, (targetRgb >> 8) & 0xFF, targetRgb & 0xFF, null);
+        float targetHue = targetHsb[0];
+        float targetSat = targetHsb[1];
+        float targetBri = targetHsb[2];
+
+        float[] pixelHsb = new float[3];
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int argb = source.getRGB(x, y);
+                int alpha = (argb >>> 24) & 0xFF;
+                if (alpha == 0) {
+                    result.setRGB(x, y, argb);
+                    continue;
+                }
+
+                int r = (argb >> 16) & 0xFF;
+                int g = (argb >> 8) & 0xFF;
+                int b = argb & 0xFF;
+
+                java.awt.Color.RGBtoHSB(r, g, b, pixelHsb);
+
+                // Set new hue to target dye hue
+                float newHue = targetHue;
+                // Blend saturation while respecting pixel texture details
+                float newSat = Math.min(1.0f, Math.max(0.10f, pixelHsb[1] * (targetSat > 0.05f ? (0.6f + 0.4f * targetSat) : targetSat)));
+                // Maintain luminance shading and scale with dye brightness
+                float newBri = Math.min(1.0f, Math.max(0.0f, pixelHsb[2] * (0.35f + 0.65f * targetBri)));
+
+                int newRgb = java.awt.Color.HSBtoRGB(newHue, newSat, newBri);
+                int newArgb = (alpha << 24) | (newRgb & 0x00FFFFFF);
+                result.setRGB(x, y, newArgb);
+            }
+        }
+        return result;
+    }
+
+    public static String getClosestDyeColorName(int rgb) {
+        int r = (rgb >> 16) & 0xFF;
+        int g = (rgb >> 8) & 0xFF;
+        int b = rgb & 0xFF;
+        String bestName = "brown";
+        double minDistance = Double.MAX_VALUE;
+        for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+            Color c = dye.getColor();
+            double dist = Math.pow(r - c.getRed(), 2) + Math.pow(g - c.getGreen(), 2) + Math.pow(b - c.getBlue(), 2);
+            if (dist < minDistance) {
+                minDistance = dist;
+                bestName = dye.name().toLowerCase(java.util.Locale.ROOT);
+            }
+        }
+        return bestName;
+    }
+
+    public static String getFriendlyDyeName(int rgb) {
+        String dyeName = getClosestDyeColorName(rgb);
+        return switch (dyeName) {
+            case "white" -> "§fTrắng";
+            case "orange" -> "§6Cam";
+            case "magenta" -> "§dĐỏ sẫm";
+            case "light_blue" -> "§bXanh nước biển nhạt";
+            case "yellow" -> "§eVàng";
+            case "lime" -> "§aXanh lá mạ";
+            case "pink" -> "§dHồng";
+            case "gray" -> "§8Xám";
+            case "light_gray" -> "§7Xám nhạt";
+            case "cyan" -> "§3Xanh lục lam";
+            case "purple" -> "§5Tím";
+            case "blue" -> "§9Xanh nước biển";
+            case "brown" -> "§6Nâu";
+            case "green" -> "§2Xanh lá cây";
+            case "red" -> "§cĐỏ";
+            case "black" -> "§8Đen";
+            default -> "§f" + dyeName;
+        };
+    }
+
+    public void setBackpackColor(ItemStack item, int rgb) {
+        if (item == null || item.getType().isAir()) return;
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.getPersistentDataContainer().set(colorKey, PersistentDataType.INTEGER, rgb);
+
+            String colorName = getClosestDyeColorName(rgb);
+            String dyedModel = "haohan:backpack_" + colorName;
+            String dyedId = "haohan:backpack_dyed_" + Integer.toHexString(rgb);
+
+            if (plugin.getServer().getPluginManager().getPlugin("HaoHanItemCore") != null) {
+                try {
+                    var core = vn.haohan.itemcore.api.HaoHanItemCore.get();
+                    var registry = core.getIconTextureRegistry();
+                    var baseOpt = registry.get("haohan:backpack");
+                    if (baseOpt.isPresent()) {
+                        if (registry.get(dyedModel).isEmpty() || registry.get(dyedId).isEmpty()) {
+                            java.awt.image.BufferedImage shifted = shiftHueImage(baseOpt.get().getImage(), rgb);
+                            if (shifted != null) {
+                                registry.register(dyedModel, new vn.haohan.itemcore.api.texture.IconTexture(dyedModel, shifted));
+                                registry.register(dyedId, new vn.haohan.itemcore.api.texture.IconTexture(dyedId, shifted));
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) { }
+            }
+
+            if (meta instanceof LeatherArmorMeta leatherMeta) {
+                leatherMeta.setColor(Color.fromRGB(rgb));
+            }
+            applyBackpackMeta(meta);
+            updateBackpackLore(meta, null);
+            item.setItemMeta(meta);
+        }
+        applyDyedColorComponent(item, rgb);
+    }
+
+    public Integer getBackpackColor(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return null;
+        return item.getItemMeta().getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
+    }
+
+    public void applyDyedColorComponent(ItemStack item, int rgb) {
+        if (item == null || item.getType().isAir()) return;
+        try {
+            Class<?> craftItemStackClass = Class.forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
+            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
+            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy", Class.forName("net.minecraft.world.item.ItemStack"));
+
+            Object nmsStack = asNMSCopy.invoke(null, item);
+            if (nmsStack == null) return;
+
+            Class<?> dyedItemColorClass = Class.forName("net.minecraft.world.item.component.DyedItemColor");
+            Object dyedColorObj;
+            try {
+                dyedColorObj = dyedItemColorClass.getConstructor(int.class, boolean.class).newInstance(rgb, false);
+            } catch (Throwable t) {
+                dyedColorObj = dyedItemColorClass.getConstructor(int.class).newInstance(rgb);
+            }
+
+            Class<?> dataComponentsClass = Class.forName("net.minecraft.core.component.DataComponents");
+            Object dyedColorComponentKey = dataComponentsClass.getField("DYED_COLOR").get(null);
+
+            Method setMethod = nmsStack.getClass().getMethod("set", Class.forName("net.minecraft.core.component.DataComponentType"), Object.class);
+            setMethod.invoke(nmsStack, dyedColorComponentKey, dyedColorObj);
+
+            ItemStack result = (ItemStack) asBukkitCopy.invoke(null, nmsStack);
+            if (result != null && result.hasItemMeta()) {
+                item.setItemMeta(result.getItemMeta());
+            }
+        } catch (Throwable ignored) {
+            // NMS reflection failsafe
+        }
+    }
+
     public void updateBackpackLore(ItemMeta meta, Inventory inventory) {
         if (meta == null) return;
 
@@ -674,9 +1003,31 @@ public final class BackpackService {
                     }
                 }
             }
+        } else if (meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+            if (bytes != null) {
+                try (BukkitObjectInputStream in = new BukkitObjectInputStream(new ByteArrayInputStream(bytes))) {
+                    Object value = in.readObject();
+                    if (value instanceof List<?> items) {
+                        for (Object obj : items) {
+                            if (obj instanceof ItemStack stack && !stack.getType().isAir()) {
+                                occupiedSlots++;
+                                if (itemLines.size() < 7) {
+                                    String name = formatItemStackName(stack);
+                                    itemLines.add(" §8• §f" + name + " §7x" + stack.getAmount());
+                                }
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) { }
+            }
         }
 
         List<String> lore = new ArrayList<>();
+        if (meta.getPersistentDataContainer().has(colorKey, PersistentDataType.INTEGER)) {
+            int rgb = meta.getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
+            lore.add("§7Màu sắc: " + getFriendlyDyeName(rgb));
+        }
         lore.add("§7Sức chứa: §e54 slot");
         lore.add("");
         lore.add("§7─── §fChứa bên trong §8(§e" + occupiedSlots + "§7/§e54§7 slot) §7───");
@@ -823,19 +1174,30 @@ public final class BackpackService {
     public ItemDisplay getWornBackpackDisplay(Player player) {
         if (player == null) return null;
         for (Entity passenger : player.getPassengers()) {
-            if (passenger instanceof ItemDisplay display && passenger.getPersistentDataContainer().has(wornKey, PersistentDataType.BYTE)) {
+            if (passenger instanceof ItemDisplay display && isWornBackpack(display)) {
                 return display;
             }
         }
         return null;
     }
 
+    public boolean isWornBackpack(Entity entity) {
+        return entity != null && entity.isValid() && entity.getPersistentDataContainer().has(wornKey, PersistentDataType.BYTE);
+    }
+
     public void removeWornBackpack(Player player) {
         if (player == null) return;
         for (Entity passenger : new ArrayList<>(player.getPassengers())) {
-            if (passenger.getPersistentDataContainer().has(wornKey, PersistentDataType.BYTE)) {
+            if (isWornBackpack(passenger)) {
                 player.removePassenger(passenger);
                 passenger.remove();
+            }
+        }
+        if (player.getWorld() != null) {
+            for (Entity nearby : player.getWorld().getNearbyEntities(player.getLocation(), 2.0, 2.0, 2.0)) {
+                if (nearby instanceof ItemDisplay && isWornBackpack(nearby) && nearby.getPassengers().isEmpty() && !player.getPassengers().contains(nearby)) {
+                    nearby.remove();
+                }
             }
         }
     }

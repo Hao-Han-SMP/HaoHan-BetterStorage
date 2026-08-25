@@ -16,12 +16,14 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
         NamespacedKey itemKey = new NamespacedKey(this, "backpack_item");
         backpackService = new BackpackService(this, itemKey);
         backpackService.registerItemCoreDefinition();
+        backpackService.registerDyeRecipes();
 
         BackpackCommand command = new BackpackCommand(backpackService);
         registerCommand("backpack", java.util.List.of("hhbp", "bp", "balo"), command);
         getServer().getPluginManager().registerEvents(new BackpackListener(this, backpackService), this);
 
         getServer().getScheduler().runTaskTimer(this, () -> getServer().getOnlinePlayers().forEach(backpackService::updateWornBackpack), 20L, 20L);
+        getServer().getOnlinePlayers().forEach(backpackService::discoverRecipes);
 
         getLogger().info("HaoHanBackpack enabled (54 storage slots)");
     }

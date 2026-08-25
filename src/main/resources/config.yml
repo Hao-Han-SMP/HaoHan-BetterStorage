@@ -5,7 +5,7 @@ custom-gui:
   prefix: ''
   glyph: ''
 rows: 6
-backpack-item-name: '&b&lBa lô thám hiểm'
+backpack-item-name: 'Backpack'
 backpack-item-model: 'haohan:backpack'
 backpack-item-lore:
   - '&7Chuột phải để mở ba lô cá nhân.'
