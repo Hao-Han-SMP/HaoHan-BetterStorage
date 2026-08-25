@@ -1,0 +1,16 @@
+name: HaoHanBackpack
+version: '${project.version}'
+main: vn.haohan.backpack.HaoHanBackpackPlugin
+description: Custom persistent backpack GUI for HaoHan SMP
+api-version: '1.21'
+author: HaoHan
+softdepend: [HaoHanItemCore]
+libraries:
+  - org.xerial:sqlite-jdbc:3.53.2.0
+permissions:
+  haohanbackpack.use:
+    default: true
+  haohanbackpack.give:
+    default: op
+  haohanbackpack.admin:
+    default: op

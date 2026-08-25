@@ -1,0 +1,25 @@
+title: '&8Ba lô của %player%'
+custom-gui:
+  enabled: true
+  font: 'haohan:gui'
+  prefix: ''
+  glyph: ''
+rows: 6
+backpack-item-name: '&b&lBa lô thám hiểm'
+backpack-item-model: 'haohan:backpack'
+backpack-item-lore:
+  - '&7Chuột phải để mở ba lô cá nhân.'
+  - '&8Dung lượng: 53 ô + 1 module'
+database:
+  file: backpacks.db
+backpack-limit:
+  enabled: false
+  default: 1
+blocked-materials: []
+keep-backpacks-after-death: true
+block-backpack-in-containers: true
+allow-backpacks-inside-backpacks: false
+hopper:
+  enabled: true
+backpack-collision:
+  enabled: true
