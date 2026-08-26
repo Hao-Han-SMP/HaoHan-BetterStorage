@@ -670,10 +670,12 @@ public final class BackpackListener implements Listener {
             event.setCancelled(true);
             ItemStack currentModule = top.getItem(raw);
             boolean isCurModule = service.isModule(currentModule);
+            vn.haohan.backpack.tier.BackpackTier tier = service.getTierFromInventory(top);
 
             if (service.isModule(cursor)) {
+                service.stopJukeboxMusic(player);
                 // Place or swap module
-                if (!isCurModule || service.isEmptyModuleSocket(currentModule)) {
+                if (!isCurModule) {
                     ItemStack toPlace = cursor.clone();
                     toPlace.setAmount(1);
                     service.cleanCustomStackSize(toPlace);
@@ -686,8 +688,14 @@ public final class BackpackListener implements Listener {
                         player.setItemOnCursor(null);
                     }
                     service.applyCustomStackLimits(top);
-                    player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.8f, 1.5f);
-                    player.sendMessage(Component.text("§a✔ Đã kích hoạt Upgrade Module! Giới hạn stack cao nhất: §e" + service.getMaxStackCapacity(top)));
+                    player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 0.7f, 1.2f);
+                    if (service.isMagnetModule(toPlace)) {
+                        player.sendMessage(Component.text("§a✔ Đã kích hoạt Magnet Module! Phạm vi hút: §e" + service.getMagnetRadius() + " ô"));
+                    } else if (service.isJukeboxModule(toPlace)) {
+                        player.sendMessage(Component.text("§a✔ Đã kích hoạt Jukebox Module! Đặt 1 đĩa nhạc vào ô máy hát caro để phát nhạc."));
+                    } else {
+                        player.sendMessage(Component.text("§a✔ Đã kích hoạt Upgrade Module! Giới hạn stack cao nhất: §e" + service.getMaxStackCapacity(top)));
+                    }
                 } else {
                     // Swap module
                     ItemStack oldModule = currentModule.clone();
@@ -698,14 +706,22 @@ public final class BackpackListener implements Listener {
                     top.setItem(raw, toPlace);
                     player.setItemOnCursor(oldModule);
                     service.applyCustomStackLimits(top);
-                    player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.8f, 1.5f);
-                    player.sendMessage(Component.text("§a✔ Đã đổi Upgrade Module! Giới hạn stack cao nhất: §e" + service.getMaxStackCapacity(top)));
+                    player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 0.7f, 1.2f);
+                    if (service.isMagnetModule(toPlace)) {
+                        player.sendMessage(Component.text("§a✔ Đã kích hoạt Magnet Module! Phạm vi hút: §e" + service.getMagnetRadius() + " ô"));
+                    } else if (service.isJukeboxModule(toPlace)) {
+                        player.sendMessage(Component.text("§a✔ Đã kích hoạt Jukebox Module! Đặt 1 đĩa nhạc vào ô máy hát caro để phát nhạc."));
+                    } else {
+                        player.sendMessage(Component.text("§a✔ Đã đổi Upgrade Module! Giới hạn stack cao nhất: §e" + service.getMaxStackCapacity(top)));
+                    }
                 }
+                boolean hasJuke = service.hasJukeboxModule(top);
+                service.updateInventoryTitle(player, top, hasJuke);
             } else if ((cursor == null || cursor.getType().isAir()) && isCurModule) {
                 // Take out module
                 ItemStack taken = currentModule.clone();
                 service.cleanCustomStackSize(taken);
-                top.setItem(raw, service.createModuleSocketItem());
+                top.setItem(raw, null);
                 player.setItemOnCursor(taken);
 
                 int newCap = service.getMaxStackCapacity(top);
@@ -731,8 +747,22 @@ public final class BackpackListener implements Listener {
                         }
                     }
                 }
-                player.playSound(player.getLocation(), Sound.BLOCK_BEACON_DEACTIVATE, 0.8f, 1.2f);
-                player.sendMessage(Component.text("§c✖ Đã gỡ Upgrade Module. Giới hạn stack hiện tại: §e" + newCap));
+                player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_GENERIC, 0.7f, 0.9f);
+                if (service.isMagnetModule(taken)) {
+                    player.sendMessage(Component.text("§c✖ Đã gỡ Magnet Module."));
+                } else if (service.isJukeboxModule(taken)) {
+                    service.stopJukeboxMusic(player);
+                    player.sendMessage(Component.text("§c✖ Đã gỡ Jukebox Module."));
+                } else if (service.isFurnaceModule(taken)) {
+                    player.sendMessage(Component.text("§c✖ Đã gỡ Furnace Module."));
+                } else {
+                    player.sendMessage(Component.text("§c✖ Đã gỡ Upgrade Module. Giới hạn stack hiện tại: §e" + newCap));
+                }
+                boolean hasJuke = service.hasJukeboxModule(top);
+                boolean hasFurnace = service.hasFurnaceModule(top);
+                service.updateInventoryTitle(player, top, hasJuke, hasFurnace);
+            } else if (cursor != null && !cursor.getType().isAir()) {
+                player.sendMessage(Component.text("§c✖ Chỉ có thể đặt Module vào ô này!"));
             }
             player.updateInventory();
             return;
@@ -775,6 +805,10 @@ public final class BackpackListener implements Listener {
 
         // Custom Deep-Stack Storage Slot Click Handlers
         if (isTop && isStorage(top, raw)) {
+            vn.haohan.backpack.tier.BackpackTier clickTier = service.getTierFromInventory(top);
+            if (clickTier.isDiscSlot(raw)) {
+                service.stopJukeboxMusic(player);
+            }
             ItemStack existing = top.getItem(raw);
             boolean cursorHasItem = cursor != null && !cursor.getType().isAir();
             boolean slotHasItem = existing != null && !existing.getType().isAir();
@@ -1046,6 +1080,10 @@ public final class BackpackListener implements Listener {
             if (isTop) {
                 // Shift-click FROM Backpack TO Player Inventory: take 1 stack (up to 64) per shift-click
                 if (!isStorage(top, raw)) return;
+                vn.haohan.backpack.tier.BackpackTier shiftTier = service.getTierFromInventory(top);
+                if (shiftTier.isDiscSlot(raw)) {
+                    service.stopJukeboxMusic(player);
+                }
                 int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(current.getType());
                 if (vanillaMax <= 0) vanillaMax = 64;
 
@@ -1073,6 +1111,118 @@ public final class BackpackListener implements Listener {
             } else {
                 // Shift-click FROM Player Inventory TO Backpack (packing up to maxCap)
                 if (service.isBackpack(current) && !service.allowBackpacksInsideBackpacks()) return;
+
+                // Quick Equip Module into available Module Socket
+                if (service.isModule(current)) {
+                    vn.haohan.backpack.tier.BackpackTier tier = service.getTierFromInventory(top);
+                    int[] moduleSlots = tier.getModuleSlots();
+                    int targetModuleSlot = -1;
+                    for (int modSlot : moduleSlots) {
+                        ItemStack existingMod = top.getItem(modSlot);
+                        if (existingMod == null || existingMod.getType().isAir() || service.isEmptyModuleSocket(existingMod)) {
+                            targetModuleSlot = modSlot;
+                            break;
+                        }
+                    }
+
+                    if (targetModuleSlot != -1) {
+                        ItemStack oneMod = current.clone();
+                        oneMod.setAmount(1);
+                        service.cleanCustomStackSize(oneMod);
+                        top.setItem(targetModuleSlot, oneMod);
+                        syncBackpackSlot(player, top, targetModuleSlot);
+
+                        if (current.getAmount() > 1) {
+                            current.setAmount(current.getAmount() - 1);
+                            event.setCurrentItem(current);
+                        } else {
+                            event.setCurrentItem(null);
+                        }
+
+                        player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_NETHERITE, 0.7f, 1.2f);
+                        if (service.isMagnetModule(oneMod)) {
+                            player.sendMessage(Component.text("§a✔ Đã gắn Magnet Module. Ba lô sẽ tự động hút vật phẩm!"));
+                        } else if (service.isJukeboxModule(oneMod)) {
+                            player.sendMessage(Component.text("§a✔ Đã gắn Jukebox Module. Đặt đĩa nhạc vào ô máy hát caro để phát nhạc!"));
+                        } else if (service.isFurnaceModule(oneMod)) {
+                            int fTier = service.getFurnaceModuleTier(oneMod);
+                            player.sendMessage(Component.text("§a✔ Đã gắn Furnace Module (Tier " + fTier + "). Ô trên: Quặng - Ô dưới: Nhiên liệu!"));
+                        } else {
+                            int newCap = service.getMaxStackCapacity(top);
+                            player.sendMessage(Component.text("§a✔ Đã gắn Upgrade Module. Giới hạn stack hiện tại: §e" + newCap));
+                        }
+
+                        boolean hasJuke = service.hasJukeboxModule(top);
+                        boolean hasFurnace = service.hasFurnaceModule(top);
+                        service.updateInventoryTitle(player, top, hasJuke, hasFurnace);
+                        player.updateInventory();
+                        return;
+                    }
+                }
+
+                // Quick Insert Music Disc into Jukebox Caro Slot if Jukebox module is equipped
+                if (service.hasJukeboxModule(top) && service.isMusicDisc(current)) {
+                    vn.haohan.backpack.tier.BackpackTier tier = service.getTierFromInventory(top);
+                    int discSlot = tier.getDiscSlot();
+                    if (discSlot >= 0 && discSlot < top.getSize()) {
+                        ItemStack existingDisc = top.getItem(discSlot);
+                        if (existingDisc == null || existingDisc.getType().isAir()) {
+                            ItemStack oneDisc = current.clone();
+                            oneDisc.setAmount(1);
+                            service.cleanCustomStackSize(oneDisc);
+                            service.applyCustomStackSize(oneDisc, maxCap);
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, discSlot, oneDisc);
+                            syncBackpackSlot(player, top, discSlot);
+
+                            if (current.getAmount() > 1) {
+                                current.setAmount(current.getAmount() - 1);
+                                event.setCurrentItem(current);
+                            } else {
+                                event.setCurrentItem(null);
+                            }
+
+                            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                            player.updateInventory();
+                            return;
+                        }
+                    }
+                }
+
+                // Quick Insert Fuel / Smeltable into Furnace Slots if Furnace module is equipped
+                if (service.hasFurnaceModule(top)) {
+                    vn.haohan.backpack.tier.BackpackTier tier = service.getTierFromInventory(top);
+                    if (service.getFuelBurnTicks(current) > 0) {
+                        int fuelSlot = tier.getFurnaceFuelSlot();
+                        if (fuelSlot >= 0 && fuelSlot < top.getSize()) {
+                            ItemStack existingFuel = top.getItem(fuelSlot);
+                            if (existingFuel == null || existingFuel.getType().isAir()) {
+                                ItemStack toPlace = current.clone();
+                                service.applyCustomStackSize(toPlace, maxCap);
+                                vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, fuelSlot, toPlace);
+                                syncBackpackSlot(player, top, fuelSlot);
+                                event.setCurrentItem(null);
+                                player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                                player.updateInventory();
+                                return;
+                            }
+                        }
+                    } else if (service.getSmeltResult(current) != null) {
+                        int inputSlot = tier.getFurnaceInputSlot();
+                        if (inputSlot >= 0 && inputSlot < top.getSize()) {
+                            ItemStack existingInput = top.getItem(inputSlot);
+                            if (existingInput == null || existingInput.getType().isAir()) {
+                                ItemStack toPlace = current.clone();
+                                service.applyCustomStackSize(toPlace, maxCap);
+                                vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, inputSlot, toPlace);
+                                syncBackpackSlot(player, top, inputSlot);
+                                event.setCurrentItem(null);
+                                player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
+                                player.updateInventory();
+                                return;
+                            }
+                        }
+                    }
+                }
 
                 ItemStack toMove = current.clone();
 
@@ -1275,6 +1425,7 @@ public final class BackpackListener implements Listener {
     @EventHandler public void onQuit(PlayerQuitEvent event) {
         Inventory top = event.getPlayer().getOpenInventory().getTopInventory();
         if (top.getHolder() instanceof BackpackHolder) service.close(event.getPlayer(), top);
+        service.stopJukeboxMusic(event.getPlayer());
         service.removeWornBackpack(event.getPlayer());
         sanitizePlayerInventory(event.getPlayer());
     }

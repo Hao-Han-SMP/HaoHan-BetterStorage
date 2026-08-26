@@ -25,6 +25,9 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
 
         getServer().getScheduler().runTaskTimer(this, backpackService::tickWornBackpacks, 1L, 1L);
         getServer().getScheduler().runTaskTimer(this, backpackService::checkCauldrons, 5L, 5L);
+        getServer().getScheduler().runTaskTimer(this, backpackService::tickMagnetModules, 2L, 2L);
+        getServer().getScheduler().runTaskTimer(this, backpackService::tickJukeboxModules, 10L, 10L);
+        getServer().getScheduler().runTaskTimer(this, backpackService::tickFurnaceModules, 5L, 5L);
         getServer().getOnlinePlayers().forEach(backpackService::discoverRecipes);
 
         getLogger().info("HaoHanBackpack enabled (54 storage slots)");
@@ -33,6 +36,7 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
     @Override
     public void onDisable() {
         if (backpackService != null) {
+            backpackService.stopAllJukeboxMusic();
             backpackService.removeAllWornBackpacks();
             getServer().getOnlinePlayers().forEach(backpackService::removeWornBackpack);
             backpackService.saveAllOpenBackpacks();

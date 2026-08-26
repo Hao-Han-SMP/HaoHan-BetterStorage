@@ -2,15 +2,30 @@ title: '&8Ba lô của %player%'
 custom-gui:
   enabled: true
   font: 'haohan:gui'
-  prefix: ''
-  glyph: ''
+  prefix: "\ue100"
+  glyph: "\ue101"
   glyphs:
-    1: ''
-    2: ''
-    3: ''
-    4: ''
-    5: ''
-    6: ''
+    1: "\ue102"
+    2: "\ue103"
+    3: "\ue104"
+    4: "\ue105"
+    5: "\ue106"
+    6: "\ue101"
+  glyphs-jukebox:
+    2: "\ue113"
+    3: "\ue114"
+    4: "\ue115"
+    6: "\ue117"
+  glyphs-furnace:
+    2: "\ue123"
+    3: "\ue124"
+    4: "\ue125"
+    6: "\ue127"
+  glyphs-furnace-jukebox:
+    2: "\ue133"
+    3: "\ue134"
+    4: "\ue135"
+    6: "\ue137"
 rows: 6
 backpack-item-name: 'Backpack'
 backpack-item-model: 'haohan:backpack'
@@ -37,4 +52,13 @@ worn-backpack:
     height: 0.75 # Độ cao vị trí đeo sau lưng khi đứng (block)
     sneak-height: 0.70 # Độ cao vị trí đeo sau lưng khi ngồi Shift (block)
 
+magnet:
+  enabled: true
+  radius: 6.0 # Bán kính hút vật phẩm rơi (block)
+  speed: 0.45 # Tốc độ hút vật phẩm
+  particles: true # Hiệu ứng hạt khi hút
 
+jukebox:
+  enabled: true
+  volume: 4.0 # Âm lượng phát nhạc (bán kính phát xung quanh người chơi)
+  particles: true # Hiệu ứng nốt nhạc bay xung quanh khi đang phát

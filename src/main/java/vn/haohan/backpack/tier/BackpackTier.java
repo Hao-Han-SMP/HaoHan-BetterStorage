@@ -52,6 +52,52 @@ public enum BackpackTier {
         return false;
     }
 
+    public int getDiscSlot() {
+        return switch (this) {
+            case IRON -> 15;
+            case GOLD -> 23;
+            case DIAMOND -> 28;
+            case NETHERITE -> 46;
+            default -> -1;
+        };
+    }
+
+    public boolean isDiscSlot(int slot) {
+        return slot == getDiscSlot();
+    }
+
+    public int getFurnaceInputSlot() {
+        return switch (this) {
+            case IRON -> 0;
+            case GOLD -> 9;
+            case DIAMOND -> 18;
+            case NETHERITE -> 36;
+            default -> -1;
+        };
+    }
+
+    public int getFurnaceFuelSlot() {
+        return switch (this) {
+            case IRON -> 9;
+            case GOLD -> 18;
+            case DIAMOND -> 27;
+            case NETHERITE -> 45;
+            default -> -1;
+        };
+    }
+
+    public boolean isFurnaceInputSlot(int slot) {
+        return slot == getFurnaceInputSlot();
+    }
+
+    public boolean isFurnaceFuelSlot(int slot) {
+        return slot == getFurnaceFuelSlot();
+    }
+
+    public boolean isFurnaceSlot(int slot) {
+        return isFurnaceInputSlot(slot) || isFurnaceFuelSlot(slot);
+    }
+
     public static BackpackTier fromId(String id) {
         if (id == null) return LEATHER;
         for (BackpackTier tier : values()) {

@@ -69,6 +69,112 @@ public final class ItemCoreHook {
             }
         }
 
+        // 2b. Register Magnet Module
+        if (!core.getItemService().exists("haohan:magnet_module")) {
+            core.getItemRegistry().register(ItemDefinition.builder("haohan:magnet_module")
+                    .material(Material.PAPER).displayName("§cMagnet Module").maxStackSize(16)
+                    .type(ItemType.MACHINE_COMPONENT).model("haohan:magnet_module")
+                    .addLore("§7Tự động hút các vật phẩm rơi")
+                    .addLore("§7xung quanh lại gần người chơi.")
+                    .addLore("§8Đặt vào ô Module trong ba lô để kích hoạt.")
+                    .build());
+        }
+
+        String magnetRecipeKey = "haohan:magnet_module_craft";
+        if (!core.getRecipeRegistry().exists(magnetRecipeKey)) {
+            Map<Character, Ingredient> ingMap = new HashMap<>();
+            ingMap.put('I', new Ingredient.MaterialIngredient(Material.IRON_INGOT));
+            ingMap.put('R', new Ingredient.MaterialIngredient(Material.REDSTONE));
+            ingMap.put('L', new Ingredient.MaterialIngredient(Material.LAPIS_LAZULI));
+            ingMap.put('M', new Ingredient.ItemIngredient("haohan:storage_module"));
+
+            core.getRecipeRegistry().register(new ShapedRecipeDefinition(
+                    magnetRecipeKey,
+                    List.of(
+                            "R L",
+                            "IMI",
+                            " I "
+                    ),
+                    ingMap,
+                    new ItemResult("haohan:magnet_module", 1)
+            ));
+        }
+
+        // 2c. Register Jukebox Module
+        if (!core.getItemService().exists("haohan:jukebox_module")) {
+            core.getItemRegistry().register(ItemDefinition.builder("haohan:jukebox_module")
+                    .material(Material.PAPER).displayName("§6Jukebox Module").maxStackSize(16)
+                    .type(ItemType.MACHINE_COMPONENT).model("haohan:jukebox_module")
+                    .addLore("§7Biến ba lô thành máy phát nhạc di động.")
+                    .addLore("§7Đặt đĩa nhạc vào ô ba lô để phát nhạc theo bạn,")
+                    .addLore("§7những người chơi xung quanh cũng có thể nghe.")
+                    .addLore("§8Đặt vào ô Module trong ba lô để kích hoạt.")
+                    .build());
+        }
+
+        String jukeboxRecipeKey = "haohan:jukebox_module_craft";
+        if (!core.getRecipeRegistry().exists(jukeboxRecipeKey)) {
+            Map<Character, Ingredient> ingMap = new HashMap<>();
+            ingMap.put('J', new Ingredient.MaterialIngredient(Material.JUKEBOX));
+            ingMap.put('N', new Ingredient.MaterialIngredient(Material.NOTE_BLOCK));
+            ingMap.put('R', new Ingredient.MaterialIngredient(Material.REDSTONE));
+            ingMap.put('M', new Ingredient.ItemIngredient("haohan:storage_module"));
+
+            core.getRecipeRegistry().register(new ShapedRecipeDefinition(
+                    jukeboxRecipeKey,
+                    List.of(
+                            "RNR",
+                            "JMJ",
+                            "RNR"
+                    ),
+                    ingMap,
+                    new ItemResult("haohan:jukebox_module", 1)
+            ));
+        }
+
+                // 2d. Register 5 Tier Furnace Modules (Tier 0 -> Tier 4)
+        record FurnaceModuleDef(String id, String name, String speedLore, Material cornerMat, String prevId, Material centerMat) {}
+        List<FurnaceModuleDef> furnaceDefs = List.of(
+                new FurnaceModuleDef("haohan:furnace_module_tier_0", "§6Module Lò Nung (Tier 0 - Cơ bản)", "§7Tốc độ nung: §e1x (10s/quặng)", Material.COBBLESTONE, "haohan:storage_module", Material.FURNACE),
+                new FurnaceModuleDef("haohan:furnace_module_tier_1", "§fModule Lò Nung (Tier 1 - Sắt)", "§7Tốc độ nung: §e2x (5s/quặng)", Material.IRON_INGOT, "haohan:furnace_module_tier_0", Material.BLAST_FURNACE),
+                new FurnaceModuleDef("haohan:furnace_module_tier_2", "§eModule Lò Nung (Tier 2 - Vàng)", "§7Tốc độ nung: §e4x (2.5s/quặng)", Material.GOLD_INGOT, "haohan:furnace_module_tier_1", Material.BLAST_FURNACE),
+                new FurnaceModuleDef("haohan:furnace_module_tier_3", "§bModule Lò Nung (Tier 3 - Kim Cương)", "§7Tốc độ nung: §e8x (1.25s/quặng)", Material.DIAMOND, "haohan:furnace_module_tier_2", Material.BLAST_FURNACE),
+                new FurnaceModuleDef("haohan:furnace_module_tier_4", "§5Module Lò Nung (Tier 4 - Netherite)", "§7Tốc độ: §d16x (Nung tức thì) §7+ §a-50% nhiên liệu", Material.NETHERITE_INGOT, "haohan:furnace_module_tier_3", Material.BLAST_FURNACE)
+        );
+
+        for (FurnaceModuleDef def : furnaceDefs) {
+            if (!core.getItemService().exists(def.id)) {
+                core.getItemRegistry().register(ItemDefinition.builder(def.id)
+                        .material(Material.PAPER).displayName(def.name).maxStackSize(16)
+                        .type(ItemType.MACHINE_COMPONENT).model(def.id)
+                        .addLore("§7Tự động nung quặng & đồ ăn trong ba lô.")
+                        .addLore(def.speedLore)
+                        .addLore("§7Ô trên: Quặng nung - Ô dưới: Nhiên liệu đốt")
+                        .addLore("§8Đặt vào ô Module trong ba lô để kích hoạt.")
+                        .build());
+            }
+
+            String rKey = def.id + "_craft";
+            if (!core.getRecipeRegistry().exists(rKey)) {
+                Map<Character, Ingredient> ingMap = new HashMap<>();
+                ingMap.put('M', new Ingredient.MaterialIngredient(def.cornerMat));
+                ingMap.put('U', new Ingredient.ItemIngredient(def.prevId));
+                ingMap.put('R', new Ingredient.MaterialIngredient(Material.REDSTONE));
+                ingMap.put('F', new Ingredient.MaterialIngredient(def.centerMat));
+
+                core.getRecipeRegistry().register(new ShapedRecipeDefinition(
+                        rKey,
+                        List.of(
+                                "MRM",
+                                "FUF",
+                                "MRM"
+                        ),
+                        ingMap,
+                        new ItemResult(def.id, 1)
+                ));
+            }
+        }
+
         // 3. Register All 5 Backpack Tiers & Colored Variants
         for (BackpackTier tier : BackpackTier.values()) {
             String baseId = "haohan:backpack_" + tier.getId();

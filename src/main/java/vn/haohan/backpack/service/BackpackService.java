@@ -1,5 +1,8 @@
 package vn.haohan.backpack.service;
 
+import org.bukkit.Bukkit;
+import org.bukkit.inventory.Recipe;
+import org.bukkit.inventory.CookingRecipe;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -579,10 +582,12 @@ public final class BackpackService {
             return null;
         }
         BackpackTier tier = sourceItem != null ? getBackpackTier(sourceItem) : BackpackTier.NETHERITE;
+        boolean hasJuke = (sourceItem != null && hasJukeboxModule(sourceItem)) || (sourceBlock != null && hasJukeboxModule(sourceBlock));
+        boolean hasFurnace = (sourceItem != null && hasFurnaceModule(sourceItem)) || (sourceBlock != null && hasFurnaceModule(sourceBlock));
         int[] dynamicStorageSlots = tier.getStorageSlots();
         BackpackHolder holder = new BackpackHolder(storageId, dynamicStorageSlots, sourceItem, sourceBlock,
                 sourceDisplay);
-        Inventory inventory = plugin.getServer().createInventory(holder, tier.getTotalSlots(), guiTitle(player, tier));
+        Inventory inventory = plugin.getServer().createInventory(holder, tier.getTotalSlots(), guiTitle(player, tier, hasJuke, hasFurnace));
         inventory.setMaxStackSize(512);
         holder.inventory(inventory);
         if (sourceItem != null) {
@@ -611,7 +616,95 @@ public final class BackpackService {
         return inventory;
     }
 
-    private Component guiTitle(Player player, BackpackTier tier) {
+    public void updateInventoryTitle(Player player, Inventory inventory, boolean hasJukebox) {
+        boolean hasFurnace = hasFurnaceModule(inventory);
+        updateInventoryTitle(player, inventory, hasJukebox, hasFurnace);
+    }
+
+    public void updateInventoryTitle(Player player, Inventory inventory, boolean hasJukebox, boolean hasFurnace) {
+        if (player == null || !player.isOnline() || inventory == null)
+            return;
+        BackpackTier tier = getTierFromInventory(inventory);
+        Component newTitle = guiTitle(player, tier, hasJukebox, hasFurnace);
+
+        // 1. Send ClientboundOpenScreenPacket via reflection to update title preserving custom font
+        try {
+            Object craftPlayer = player;
+            java.lang.reflect.Method getHandleMethod = craftPlayer.getClass().getMethod("getHandle");
+            Object serverPlayer = getHandleMethod.invoke(craftPlayer);
+            java.lang.reflect.Field containerMenuField = serverPlayer.getClass().getField("containerMenu");
+            Object containerMenu = containerMenuField.get(serverPlayer);
+
+            java.lang.reflect.Field containerIdField = containerMenu.getClass().getField("containerId");
+            int containerId = containerIdField.getInt(containerMenu);
+
+            java.lang.reflect.Method getTypeMethod = containerMenu.getClass().getMethod("getType");
+            Object menuType = getTypeMethod.invoke(containerMenu);
+
+            Class<?> paperAdventureClass = Class.forName("io.papermc.paper.adventure.PaperAdventure");
+            java.lang.reflect.Method asVanillaMethod = paperAdventureClass.getMethod("asVanilla", net.kyori.adventure.text.Component.class);
+            Object nmsComponent = asVanillaMethod.invoke(null, newTitle);
+
+            Class<?> packetClass = Class.forName("net.minecraft.network.protocol.game.ClientboundOpenScreenPacket");
+            java.lang.reflect.Constructor<?> targetCtor = null;
+            for (java.lang.reflect.Constructor<?> c : packetClass.getConstructors()) {
+                if (c.getParameterCount() == 3) {
+                    targetCtor = c;
+                    break;
+                }
+            }
+            if (targetCtor != null) {
+                Object packet = targetCtor.newInstance(containerId, menuType, nmsComponent);
+                java.lang.reflect.Field connectionField = serverPlayer.getClass().getField("connection");
+                Object connection = connectionField.get(serverPlayer);
+                java.lang.reflect.Method sendMethod = null;
+                for (java.lang.reflect.Method m : connection.getClass().getMethods()) {
+                    if ((m.getName().equals("send") || m.getName().equals("sendPacket")) && m.getParameterCount() == 1) {
+                        sendMethod = m;
+                        break;
+                    }
+                }
+                if (sendMethod != null) {
+                    sendMethod.invoke(connection, packet);
+                    java.lang.reflect.Method sendDataMethod = containerMenu.getClass().getMethod("sendAllDataToRemote");
+                    sendDataMethod.invoke(containerMenu);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        // 2. Fallback: Smooth inventory recreate with custom font Component
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (player.isOnline() && player.getOpenInventory().getTopInventory().equals(inventory)) {
+                ItemStack cursor = player.getItemOnCursor() != null ? player.getItemOnCursor().clone() : null;
+                BackpackHolder holder = inventory.getHolder() instanceof BackpackHolder h ? h : null;
+                Inventory newInv = plugin.getServer().createInventory(holder, tier.getTotalSlots(), newTitle);
+                newInv.setMaxStackSize(512);
+                if (holder != null) {
+                    holder.inventory(newInv);
+                    if (holder.sourceItem() != null) {
+                        open.put(backpackId(holder.sourceItem()), newInv);
+                    }
+                }
+                newInv.setContents(inventory.getContents());
+                player.openInventory(newInv);
+                if (cursor != null) {
+                    player.setItemOnCursor(cursor);
+                }
+            }
+        });
+    }
+
+        public Component guiTitle(Player player, BackpackTier tier) {
+        return guiTitle(player, tier, false, false);
+    }
+
+    public Component guiTitle(Player player, BackpackTier tier, boolean hasJukebox) {
+        return guiTitle(player, tier, hasJukebox, false);
+    }
+
+    public Component guiTitle(Player player, BackpackTier tier, boolean hasJukebox, boolean hasFurnace) {
         String fallback = plugin.getConfig().getString("title", "&8Ba lô của %player%").replace("%player%",
                 player.getName());
         if (!plugin.getConfig().getBoolean("custom-gui.enabled", true))
@@ -620,26 +713,71 @@ public final class BackpackService {
         String font = plugin.getConfig().getString("custom-gui.font", "haohan:gui");
         String prefix = "\uE100";
         if (plugin.getConfig().contains("custom-gui.prefix")) {
-            String cfgPrefix = plugin.getConfig().getString("custom-gui.prefix");
-            if (cfgPrefix != null && !cfgPrefix.isEmpty() && !cfgPrefix.contains("?") && !cfgPrefix.contains("")) {
+            String cfgPrefix = unescapeUnicode(plugin.getConfig().getString("custom-gui.prefix"));
+            if (cfgPrefix != null && !cfgPrefix.isEmpty() && !cfgPrefix.contains("?")) {
                 prefix = cfgPrefix;
             }
         }
 
         int rows = tier != null ? tier.getRows() : 6;
-        String glyph = switch (rows) {
-            case 1 -> "\uE102";
-            case 2 -> "\uE103";
-            case 3 -> "\uE104";
-            case 4 -> "\uE105";
-            case 5 -> "\uE106";
-            case 6 -> "\uE101";
-            default -> "\uE101";
-        };
-        if (plugin.getConfig().contains("custom-gui.glyphs." + rows)) {
-            String cfgGlyph = plugin.getConfig().getString("custom-gui.glyphs." + rows);
-            if (cfgGlyph != null && !cfgGlyph.isEmpty() && !cfgGlyph.contains("?") && !cfgGlyph.contains("")) {
-                glyph = cfgGlyph;
+        String glyph;
+        if (hasFurnace && hasJukebox) {
+            glyph = switch (rows) {
+                case 2 -> "\uE133";
+                case 3 -> "\uE134";
+                case 4 -> "\uE135";
+                case 6 -> "\uE137";
+                default -> "\uE137";
+            };
+            if (plugin.getConfig().contains("custom-gui.glyphs-furnace-jukebox." + rows)) {
+                String cfgGlyph = unescapeUnicode(plugin.getConfig().getString("custom-gui.glyphs-furnace-jukebox." + rows));
+                if (cfgGlyph != null && !cfgGlyph.isEmpty() && !cfgGlyph.contains("?")) {
+                    glyph = cfgGlyph;
+                }
+            }
+        } else if (hasFurnace) {
+            glyph = switch (rows) {
+                case 2 -> "\uE123";
+                case 3 -> "\uE124";
+                case 4 -> "\uE125";
+                case 6 -> "\uE127";
+                default -> "\uE127";
+            };
+            if (plugin.getConfig().contains("custom-gui.glyphs-furnace." + rows)) {
+                String cfgGlyph = unescapeUnicode(plugin.getConfig().getString("custom-gui.glyphs-furnace." + rows));
+                if (cfgGlyph != null && !cfgGlyph.isEmpty() && !cfgGlyph.contains("?")) {
+                    glyph = cfgGlyph;
+                }
+            }
+        } else if (hasJukebox) {
+            glyph = switch (rows) {
+                case 2 -> "\uE113";
+                case 3 -> "\uE114";
+                case 4 -> "\uE115";
+                case 6 -> "\uE117";
+                default -> "\uE111";
+            };
+            if (plugin.getConfig().contains("custom-gui.glyphs-jukebox." + rows)) {
+                String cfgGlyph = unescapeUnicode(plugin.getConfig().getString("custom-gui.glyphs-jukebox." + rows));
+                if (cfgGlyph != null && !cfgGlyph.isEmpty() && !cfgGlyph.contains("?")) {
+                    glyph = cfgGlyph;
+                }
+            }
+        } else {
+            glyph = switch (rows) {
+                case 1 -> "\uE102";
+                case 2 -> "\uE103";
+                case 3 -> "\uE104";
+                case 4 -> "\uE105";
+                case 5 -> "\uE106";
+                case 6 -> "\uE101";
+                default -> "\uE101";
+            };
+            if (plugin.getConfig().contains("custom-gui.glyphs." + rows)) {
+                String cfgGlyph = unescapeUnicode(plugin.getConfig().getString("custom-gui.glyphs." + rows));
+                if (cfgGlyph != null && !cfgGlyph.isEmpty() && !cfgGlyph.contains("?")) {
+                    glyph = cfgGlyph;
+                }
             }
         }
         net.kyori.adventure.key.Key fontKey = net.kyori.adventure.key.Key.key(font);
@@ -648,34 +786,43 @@ public final class BackpackService {
                 .color(NamedTextColor.WHITE);
     }
 
+    public static String unescapeUnicode(String st) {
+        if (st == null) return null;
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        while (i < st.length()) {
+            char c = st.charAt(i);
+            if (c == '\\' && i + 1 < st.length()) {
+                char next = st.charAt(i + 1);
+                if ((next == 'u' || next == 'U') && i + 5 < st.length()) {
+                    try {
+                        String hex = st.substring(i + 2, i + 6);
+                        int code = Integer.parseInt(hex, 16);
+                        sb.append((char) code);
+                        i += 6;
+                        continue;
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            sb.append(c);
+            i++;
+        }
+        return sb.toString();
+    }
+
     /**
      * The custom bitmap GUI supplies the background; module sockets are real locked
      * items.
      */
-    private void decorate(Inventory inventory) {
+        private void decorate(Inventory inventory) {
         if (inventory == null)
             return;
-        BackpackTier tier = getTierFromInventory(inventory);
-        int[] moduleSlots = tier.getModuleSlots();
-        int[] storageSlots = tier.getStorageSlots();
-
-        // Clean out any rogue empty module placeholders from storage slots
-        for (int slot : storageSlots) {
-            if (slot < inventory.getSize()) {
-                ItemStack item = inventory.getItem(slot);
-                if (item != null && isEmptyModuleSocket(item)) {
-                    inventory.setItem(slot, null);
-                }
-            }
-        }
-
-        ItemStack socket = createModuleSocketItem();
-        for (int slot : moduleSlots) {
-            if (slot < inventory.getSize()) {
-                ItemStack current = inventory.getItem(slot);
-                if (current == null || current.getType().isAir()) {
-                    inventory.setItem(slot, socket.clone());
-                }
+        // Clean out any legacy empty module placeholders from all slots
+        for (int i = 0; i < inventory.getSize(); i++) {
+            ItemStack item = inventory.getItem(i);
+            if (item != null && isEmptyModuleSocket(item)) {
+                inventory.setItem(i, null);
             }
         }
         applyCustomStackLimits(inventory);
@@ -721,7 +868,7 @@ public final class BackpackService {
         if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
             try {
                 String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
-                if (id != null && (id.startsWith("haohan:upgrade_tier_") || id.equals("haohan:storage_module")))
+                if (id != null && (id.startsWith("haohan:upgrade_tier_") || id.equals("haohan:storage_module") || id.equals("haohan:magnet_module") || id.equals("haohan:jukebox_module") || id.startsWith("haohan:furnace_module")))
                     return true;
             } catch (Throwable ignored) {
             }
@@ -752,6 +899,35 @@ public final class BackpackService {
         };
     }
 
+    public int getMaxStackCapacity(ItemStack backpack) {
+        if (backpack == null || !isBackpack(backpack))
+            return 64;
+        UUID id = backpackId(backpack);
+        if (id != null && open.containsKey(id)) {
+            return getMaxStackCapacity(open.get(id));
+        }
+        ItemMeta meta = backpack.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            return 64;
+        }
+        byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = getBackpackTier(meta);
+        int highestCap = 64;
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < items.size()) {
+                ItemStack module = items.get(slot);
+                if (module != null && isModule(module)) {
+                    int cap = getModuleStackCapacity(module);
+                    if (cap > highestCap) {
+                        highestCap = cap;
+                    }
+                }
+            }
+        }
+        return highestCap;
+    }
+
     public int getMaxStackCapacity(Inventory inventory) {
         if (inventory == null)
             return 64;
@@ -769,6 +945,538 @@ public final class BackpackService {
             }
         }
         return highestCap;
+    }
+
+    public boolean isMagnetModule(ItemStack item) {
+        if (item == null || item.getType().isAir() || isEmptyModuleSocket(item))
+            return false;
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
+                if ("haohan:magnet_module".equals(id))
+                    return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
+    }
+
+    public boolean hasMagnetModule(ItemStack backpack) {
+        if (backpack == null || !isBackpack(backpack))
+            return false;
+        UUID id = backpackId(backpack);
+        if (id != null && open.containsKey(id)) {
+            return hasMagnetModule(open.get(id));
+        }
+        ItemMeta meta = backpack.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            return false;
+        }
+        byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = getBackpackTier(meta);
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < items.size()) {
+                ItemStack mod = items.get(slot);
+                if (isMagnetModule(mod)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean hasMagnetModule(Inventory inventory) {
+        if (inventory == null)
+            return false;
+        BackpackTier tier = getTierFromInventory(inventory);
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < inventory.getSize()) {
+                ItemStack mod = inventory.getItem(slot);
+                if (isMagnetModule(mod)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean hasMagnetActive(Player player) {
+        if (player == null || !player.isValid() || player.isDead() || player.getGameMode() == org.bukkit.GameMode.SPECTATOR) {
+            return false;
+        }
+        ItemStack worn = getWornOrEquippedBackpack(player);
+        if (worn != null && isBackpack(worn) && hasMagnetModule(worn)) {
+            return true;
+        }
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (item != null && isBackpack(item) && hasMagnetModule(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public double getMagnetRadius() {
+        return plugin.getConfig().getDouble("magnet.radius", 6.0);
+    }
+
+    public void tickMagnetModules() {
+        if (!plugin.getConfig().getBoolean("magnet.enabled", true))
+            return;
+        double radius = getMagnetRadius();
+        if (radius <= 0)
+            return;
+        double speed = plugin.getConfig().getDouble("magnet.speed", 0.45);
+        boolean particles = plugin.getConfig().getBoolean("magnet.particles", true);
+
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+            if (!hasMagnetActive(player))
+                continue;
+
+            Location playerLoc = player.getLocation().add(0, 0.75, 0);
+            for (Entity entity : player.getWorld().getNearbyEntities(playerLoc, radius, radius, radius)) {
+                if (!(entity instanceof org.bukkit.entity.Item itemEntity))
+                    continue;
+                if (!itemEntity.isValid() || itemEntity.isDead())
+                    continue;
+                if (itemEntity.getPickupDelay() > 0)
+                    continue;
+
+                Location itemLoc = itemEntity.getLocation();
+                double distSq = playerLoc.distanceSquared(itemLoc);
+                if (distSq > radius * radius || distSq < 0.05)
+                    continue;
+
+                org.bukkit.util.Vector dir = playerLoc.toVector().subtract(itemLoc.toVector());
+                double dist = Math.sqrt(distSq);
+                if (dist > 0.001) {
+                    org.bukkit.util.Vector pull = dir.normalize().multiply(speed);
+                    itemEntity.setVelocity(pull);
+
+                    if (particles && (player.getTicksLived() % 4 == 0)) {
+                        player.getWorld().spawnParticle(
+                                Particle.DUST,
+                                itemLoc.clone().add(0, 0.2, 0),
+                                1, 0.05, 0.05, 0.05, 0.0,
+                                new Particle.DustOptions(Color.fromRGB(220, 20, 60), 0.6f)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    public boolean isJukeboxModule(ItemStack item) {
+        if (item == null || item.getType().isAir() || isEmptyModuleSocket(item))
+            return false;
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
+                if ("haohan:jukebox_module".equals(id))
+                    return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
+    }
+
+    public static class DiscInfo {
+        private final String soundKey;
+        private final Sound soundEnum;
+        private final String displayName;
+        private final int durationTicks;
+        private final String uniqueId;
+
+        public DiscInfo(String soundKey, Sound soundEnum, String displayName, int durationTicks, String uniqueId) {
+            this.soundKey = soundKey;
+            this.soundEnum = soundEnum;
+            this.displayName = displayName;
+            this.durationTicks = durationTicks;
+            this.uniqueId = uniqueId;
+        }
+
+        public String getSoundKey() { return soundKey; }
+        public Sound getSoundEnum() { return soundEnum; }
+        public String getDisplayName() { return displayName; }
+        public int getDurationTicks() { return durationTicks; }
+        public String getUniqueId() { return uniqueId; }
+    }
+
+        public DiscInfo getDiscInfo(ItemStack item) {
+        if (item == null || item.getType().isAir())
+            return null;
+
+        // 1. Check ItemCore custom item ID
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
+                if (id != null) {
+                    if (id.contains("i_really_want_to_stay_at_your_house")) {
+                        String name = "Rosa Walton - I Really Want to Stay at Your House";
+                        if (item.hasItemMeta() && item.getItemMeta().hasDisplayName()) {
+                            name = item.getItemMeta().getDisplayName();
+                        }
+                        return new DiscInfo("haohan:music_disc.i_really_want_to_stay_at_your_house", null, name, 5004, id);
+                    } else if (id.startsWith("haohan:")) {
+                        String discKey = id.replace("haohan:", "").replace("item/", "").replace("music_disc.", "");
+                        String name = Character.toUpperCase(discKey.charAt(0)) + discKey.substring(1).replace("_", " ");
+                        if (item.hasItemMeta() && item.getItemMeta().hasDisplayName()) {
+                            name = item.getItemMeta().getDisplayName();
+                        }
+                        return new DiscInfo("haohan:music_disc." + discKey, null, name, 5000, id);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        // 2. Check 1.21.4 ItemModel component & DisplayName
+        if (item.hasItemMeta()) {
+            org.bukkit.inventory.meta.ItemMeta meta = item.getItemMeta();
+            try {
+                if (meta.hasItemModel()) {
+                    org.bukkit.NamespacedKey model = meta.getItemModel();
+                    if (model != null) {
+                        String modelStr = model.toString().toLowerCase();
+                        if (modelStr.contains("i_really_want_to_stay_at_your_house")) {
+                            String name = "Rosa Walton - I Really Want to Stay at Your House";
+                            if (meta.hasDisplayName()) {
+                                name = meta.getDisplayName();
+                            }
+                            return new DiscInfo("haohan:music_disc.i_really_want_to_stay_at_your_house", null, name, 5004, "haohan:i_really_want_to_stay_at_your_house");
+                        } else if (model.getNamespace().equals("haohan")) {
+                            String discKey = model.getKey().replace("item/", "").replace("music_disc.", "");
+                            String name = Character.toUpperCase(discKey.charAt(0)) + discKey.substring(1).replace("_", " ");
+                            if (meta.hasDisplayName()) {
+                                name = meta.getDisplayName();
+                            }
+                            return new DiscInfo("haohan:music_disc." + discKey, null, name, 5000, model.toString());
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+
+            // Check Display Name specifically for known custom tracks
+            if (meta.hasDisplayName()) {
+                String dName = meta.getDisplayName();
+                String plain = dName.replaceAll("§[0-9a-fk-or]", "").toLowerCase();
+                if (plain.contains("i really want to stay at your house") || plain.contains("stay at your house")) {
+                    return new DiscInfo("haohan:music_disc.i_really_want_to_stay_at_your_house", null, dName, 5004, "haohan:i_really_want_to_stay_at_your_house");
+                }
+            }
+
+            // Check JukeboxPlayable component
+            try {
+                if (meta.hasJukeboxPlayable()) {
+                    org.bukkit.inventory.meta.components.JukeboxPlayableComponent jb = meta.getJukeboxPlayable();
+                    org.bukkit.NamespacedKey songKey = jb.getSongKey();
+                    if (songKey != null) {
+                        String songName = songKey.getKey();
+                        String formatted = Character.toUpperCase(songName.charAt(0)) + songName.substring(1).replace("_", " ");
+                        if (meta.hasDisplayName()) {
+                            formatted = meta.getDisplayName();
+                        }
+                        String soundKey = songKey.getNamespace().equals("minecraft")
+                                ? "minecraft:music_disc." + songKey.getKey()
+                                : songKey.getNamespace() + ":music_disc." + songKey.getKey();
+                        return new DiscInfo(soundKey, null, formatted, 5004, songKey.toString());
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        // 3. Vanilla fallback
+        Material mat = item.getType();
+        if (mat.isRecord() || mat.name().startsWith("MUSIC_DISC_")) {
+            Sound sound = getDiscSound(mat);
+            String name = formatDiscName(mat);
+            if (item.hasItemMeta() && item.getItemMeta().hasDisplayName()) {
+                name = item.getItemMeta().getDisplayName();
+            }
+            int duration = getDiscDurationTicks(mat);
+            return new DiscInfo(null, sound, name, duration, mat.name());
+        }
+
+        return null;
+    }
+
+    public boolean isMusicDisc(ItemStack item) {
+        return getDiscInfo(item) != null;
+    }
+
+    public boolean hasJukeboxModule(ItemStack backpack) {
+        if (backpack == null || !isBackpack(backpack))
+            return false;
+        UUID id = backpackId(backpack);
+        if (id != null && open.containsKey(id)) {
+            return hasJukeboxModule(open.get(id));
+        }
+        ItemMeta meta = backpack.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            return false;
+        }
+        byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = getBackpackTier(meta);
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < items.size()) {
+                ItemStack mod = items.get(slot);
+                if (isJukeboxModule(mod)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean hasJukeboxModule(TileState state) {
+        if (state == null)
+            return false;
+        if (!state.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY))
+            return false;
+        byte[] bytes = state.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = BackpackTier.NETHERITE;
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < items.size()) {
+                ItemStack mod = items.get(slot);
+                if (isJukeboxModule(mod)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean hasJukeboxModule(Inventory inventory) {
+        if (inventory == null)
+            return false;
+        BackpackTier tier = getTierFromInventory(inventory);
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < inventory.getSize()) {
+                ItemStack mod = inventory.getItem(slot);
+                if (isJukeboxModule(mod)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public ItemStack getMusicDisc(ItemStack backpack) {
+        if (backpack == null || !isBackpack(backpack))
+            return null;
+        UUID id = backpackId(backpack);
+        if (id != null && open.containsKey(id)) {
+            return getMusicDisc(open.get(id));
+        }
+        ItemMeta meta = backpack.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            return null;
+        }
+        byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = getBackpackTier(meta);
+        int discSlot = tier.getDiscSlot();
+        if (discSlot >= 0 && discSlot < items.size()) {
+            ItemStack item = items.get(discSlot);
+            if (isMusicDisc(item)) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    public ItemStack getMusicDisc(Inventory inventory) {
+        if (inventory == null)
+            return null;
+        BackpackTier tier = getTierFromInventory(inventory);
+        int discSlot = tier.getDiscSlot();
+        if (discSlot >= 0 && discSlot < inventory.getSize()) {
+            ItemStack item = inventory.getItem(discSlot);
+            if (isMusicDisc(item)) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    public static Sound getDiscSound(Material mat) {
+        try {
+            return Sound.valueOf(mat.name());
+        } catch (Throwable ignored) {
+            return Sound.MUSIC_DISC_CAT;
+        }
+    }
+
+    public static int getDiscDurationTicks(Material mat) {
+        return switch (mat) {
+            case MUSIC_DISC_13 -> 3560;
+            case MUSIC_DISC_CAT -> 3700;
+            case MUSIC_DISC_BLOCKS -> 6900;
+            case MUSIC_DISC_CHIRP -> 3700;
+            case MUSIC_DISC_FAR -> 3480;
+            case MUSIC_DISC_MALL -> 3940;
+            case MUSIC_DISC_MELLOHI -> 1920;
+            case MUSIC_DISC_STAL -> 3000;
+            case MUSIC_DISC_STRAD -> 3760;
+            case MUSIC_DISC_WARD -> 5020;
+            case MUSIC_DISC_11 -> 1420;
+            case MUSIC_DISC_WAIT -> 4760;
+            case MUSIC_DISC_OTHERSIDE -> 3900;
+            case MUSIC_DISC_5 -> 3560;
+            case MUSIC_DISC_PIGSTEP -> 2960;
+            case MUSIC_DISC_RELIC -> 4360;
+            case MUSIC_DISC_CREATOR -> 3520;
+            case MUSIC_DISC_CREATOR_MUSIC_BOX -> 1460;
+            case MUSIC_DISC_PRECIPICE -> 5980;
+            default -> 3600;
+        };
+    }
+
+    public static String formatDiscName(Material mat) {
+        String name = mat.name().replace("MUSIC_DISC_", "").toLowerCase(Locale.ROOT);
+        name = Character.toUpperCase(name.charAt(0)) + name.substring(1).replace("_", " ");
+        return name;
+    }
+
+    private static class JukeboxPlayState {
+        String currentDiscId;
+        String soundKey;
+        Sound soundEnum;
+        int ticksLeft;
+
+        JukeboxPlayState(String currentDiscId, String soundKey, Sound soundEnum, int ticksLeft) {
+            this.currentDiscId = currentDiscId;
+            this.soundKey = soundKey;
+            this.soundEnum = soundEnum;
+            this.ticksLeft = ticksLeft;
+        }
+    }
+
+    private final Map<UUID, JukeboxPlayState> activeJukeboxes = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void stopJukeboxMusic(Player player) {
+        if (player == null || !player.isOnline())
+            return;
+        JukeboxPlayState state = activeJukeboxes.remove(player.getUniqueId());
+        stopJukeboxSound(player, state);
+    }
+
+    public void stopJukeboxSound(Player player, JukeboxPlayState state) {
+        if (player == null || !player.isOnline())
+            return;
+        try {
+            for (Player nearby : player.getWorld().getPlayers()) {
+                if (nearby.getLocation().distanceSquared(player.getLocation()) <= 64.0 * 64.0) {
+                    if (state != null) {
+                        if (state.soundKey != null) {
+                            nearby.stopSound(state.soundKey, org.bukkit.SoundCategory.RECORDS);
+                            nearby.stopSound(state.soundKey);
+                            if (state.soundKey.contains(":")) {
+                                nearby.stopSound(state.soundKey.split(":")[1]);
+                                nearby.stopSound(state.soundKey.split(":")[1], org.bukkit.SoundCategory.RECORDS);
+                            }
+                        }
+                        if (state.soundEnum != null) {
+                            nearby.stopSound(state.soundEnum, org.bukkit.SoundCategory.RECORDS);
+                            nearby.stopSound(state.soundEnum);
+                        }
+                    } else {
+                        nearby.stopSound(org.bukkit.SoundCategory.RECORDS);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }public void stopAllJukeboxMusic() {
+        for (UUID pid : activeJukeboxes.keySet()) {
+            Player p = plugin.getServer().getPlayer(pid);
+            if (p != null) {
+                stopJukeboxMusic(p);
+            }
+        }
+        activeJukeboxes.clear();
+    }
+
+    public void tickJukeboxModules() {
+        if (!plugin.getConfig().getBoolean("jukebox.enabled", true)) {
+            if (!activeJukeboxes.isEmpty()) {
+                stopAllJukeboxMusic();
+            }
+            return;
+        }
+
+        float volume = (float) plugin.getConfig().getDouble("jukebox.volume", 4.0);
+        boolean particles = plugin.getConfig().getBoolean("jukebox.particles", true);
+
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+            UUID pid = player.getUniqueId();
+            if (!player.isValid() || player.isDead() || player.getGameMode() == org.bukkit.GameMode.SPECTATOR) {
+                if (activeJukeboxes.remove(pid) != null) {
+                    stopJukeboxMusic(player);
+                }
+                continue;
+            }
+
+            ItemStack activeBackpack = null;
+            ItemStack worn = getWornOrEquippedBackpack(player);
+            if (worn != null && isBackpack(worn) && hasJukeboxModule(worn)) {
+                activeBackpack = worn;
+            } else {
+                for (ItemStack item : player.getInventory().getContents()) {
+                    if (item != null && isBackpack(item) && hasJukeboxModule(item)) {
+                        activeBackpack = item;
+                        break;
+                    }
+                }
+            }
+
+            if (activeBackpack != null) {
+                ItemStack disc = getMusicDisc(activeBackpack);
+                DiscInfo info = disc != null ? getDiscInfo(disc) : null;
+                if (info != null) {
+                    JukeboxPlayState state = activeJukeboxes.get(pid);
+
+                    if (state == null || !java.util.Objects.equals(state.currentDiscId, info.getUniqueId()) || state.ticksLeft <= 0) {
+                        stopJukeboxMusic(player);
+                        try {
+                            if (info.getSoundKey() != null) {
+                                player.getWorld().playSound(player.getLocation(), info.getSoundKey(), org.bukkit.SoundCategory.RECORDS, volume, 1.0f);
+                            } else if (info.getSoundEnum() != null) {
+                                player.getWorld().playSound(player, info.getSoundEnum(), org.bukkit.SoundCategory.RECORDS, volume, 1.0f);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        activeJukeboxes.put(pid, new JukeboxPlayState(info.getUniqueId(), info.getSoundKey(), info.getSoundEnum(), info.getDurationTicks()));
+                        player.sendActionBar(Component.text("§6🎵 Ba lô đang phát: §e" + info.getDisplayName()));
+                    } else {
+                        state.ticksLeft -= 10;
+                    }
+
+                    if (particles && (player.getTicksLived() % 10 == 0)) {
+                        Location noteLoc = player.getLocation().add(0, 2.1, 0);
+                        double noteColor = (player.getTicksLived() % 24) / 24.0;
+                        player.getWorld().spawnParticle(
+                                Particle.NOTE,
+                                noteLoc,
+                                1, 0.35, 0.15, 0.35, noteColor
+                        );
+                    }
+                } else {
+                    if (activeJukeboxes.remove(pid) != null) {
+                        stopJukeboxMusic(player);
+                    }
+                }
+            } else {
+                if (activeJukeboxes.remove(pid) != null) {
+                    stopJukeboxMusic(player);
+                }
+            }
+        }
     }
 
     public void applyCustomStackSize(ItemStack item, int maxCap) {
@@ -984,34 +1692,14 @@ public final class BackpackService {
     private void loadItems(List<?> items, Inventory inventory) {
         inventory.setMaxStackSize(512);
         int invSize = inventory.getSize();
-        BackpackTier tier = getTierFromInventory(inventory);
-        int[] moduleSlots = tier.getModuleSlots();
 
         for (int i = 0; i < invSize && i < items.size(); i++) {
             Object obj = items.get(i);
             ItemStack stack = obj instanceof ItemStack s ? s : null;
-            if (tier.isModuleSlot(i)) {
-                if (stack != null && !stack.getType().isAir() && isModule(stack)) {
-                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inventory, i, stack);
-                } else {
-                    inventory.setItem(i, createModuleSocketItem());
-                }
-            } else {
-                if (stack != null && !stack.getType().isAir()) {
-                    if (isEmptyModuleSocket(stack)) {
-                        stack = null;
-                    }
-                }
+            if (stack != null && !stack.getType().isAir() && !isEmptyModuleSocket(stack)) {
                 vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inventory, i, stack);
-            }
-        }
-
-        for (int slot : moduleSlots) {
-            if (slot < invSize) {
-                ItemStack cur = inventory.getItem(slot);
-                if (cur == null || cur.getType().isAir()) {
-                    inventory.setItem(slot, createModuleSocketItem());
-                }
+            } else {
+                vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inventory, i, null);
             }
         }
 
@@ -1652,8 +2340,16 @@ public final class BackpackService {
         List<String> itemLines = new ArrayList<>();
 
         int cap = 64;
+        boolean hasMagnet = false;
+        boolean hasJukebox = false;
+        ItemStack playingDisc = null;
         if (inventory != null) {
             cap = getMaxStackCapacity(inventory);
+            hasMagnet = hasMagnetModule(inventory);
+            hasJukebox = hasJukeboxModule(inventory);
+            if (hasJukebox) {
+                playingDisc = getMusicDisc(inventory);
+            }
             for (int slot : tier.getStorageSlots()) {
                 if (slot < inventory.getSize()) {
                     ItemStack stack = inventory.getItem(slot);
@@ -1676,7 +2372,14 @@ public final class BackpackService {
                         int moduleCap = getModuleStackCapacity(stack);
                         if (moduleCap > cap)
                             cap = moduleCap;
+                        if (isMagnetModule(stack))
+                            hasMagnet = true;
+                        if (isJukeboxModule(stack))
+                            hasJukebox = true;
                     } else if (!tier.isModuleSlot(i)) {
+                        if (playingDisc == null && isMusicDisc(stack)) {
+                            playingDisc = stack;
+                        }
                         occupiedSlots++;
                         if (itemLines.size() < 7) {
                             String name = formatItemStackName(stack);
@@ -1701,6 +2404,18 @@ public final class BackpackService {
         }
         if (cap > 64) {
             lore.add("§7Giới hạn Stack: §e" + cap);
+        }
+        if (hasMagnet) {
+            lore.add("§7Tính năng: §cModule Nam Châm §8(Hút đồ)");
+        }
+        if (hasJukebox) {
+            if (playingDisc != null) {
+                DiscInfo info = getDiscInfo(playingDisc);
+                String discTitle = info != null ? info.getDisplayName() : formatDiscName(playingDisc.getType());
+                lore.add("§7Tính năng: §6Module Máy Hát §8(Đang phát: §e" + discTitle + "§8)");
+            } else {
+                lore.add("§7Tính năng: §6Module Máy Hát §8(Cần 1 đĩa nhạc)");
+            }
         }
         lore.add("");
         lore.add("§7─── §fChứa bên trong §8(§e" + occupiedSlots + "§7/§e" + tier.getStorageSlotsCount()
@@ -1800,6 +2515,39 @@ public final class BackpackService {
         state.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY,
                 serializeInventory(inventory));
         state.update(true, false);
+    }
+
+    public byte[] serializeItems(List<ItemStack> items) {
+        try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                DataOutputStream dataOut = new DataOutputStream(bytes)) {
+            dataOut.writeInt(0x48484250); // Magic 'HHBP'
+            dataOut.writeInt(2); // Version 2
+            int size = items.size();
+            dataOut.writeInt(size);
+
+            try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(dataOut)) {
+                for (int physical = 0; physical < size; physical++) {
+                    ItemStack item = items.get(physical);
+                    boolean isModuleSocket = (physical == size - 1) && isEmptyModuleSocket(item);
+                    if (item == null || item.getType().isAir() || isModuleSocket) {
+                        dataOut.writeBoolean(false);
+                    } else {
+                        dataOut.writeBoolean(true);
+                        int realAmount = item.getAmount();
+                        dataOut.writeInt(realAmount);
+
+                        ItemStack toSerialize = item.clone();
+                        toSerialize.setAmount(1);
+                        cleanCustomStackSize(toSerialize);
+                        out.writeObject(toSerialize);
+                    }
+                }
+                out.flush();
+            }
+            return bytes.toByteArray();
+        } catch (IOException ex) {
+            throw new IllegalStateException("Không serialize được items", ex);
+        }
     }
 
     private byte[] serializeInventory(Inventory inventory) {
@@ -1949,31 +2697,37 @@ public final class BackpackService {
         return wornKey;
     }
 
-    private final Map<UUID, ItemDisplay> wornDisplays = new java.util.concurrent.ConcurrentHashMap<>();
+        private final Map<UUID, ItemDisplay> wornDisplays = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<UUID, Float> playerBodyYawTracker = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<UUID, Location> playerLastLocationTracker = new java.util.concurrent.ConcurrentHashMap<>();
 
     public void tickWornBackpacks() {
         if (!plugin.getConfig().getBoolean("worn-backpack.enabled", true)) {
             if (!wornDisplays.isEmpty()) {
                 wornDisplays.values().forEach(Entity::remove);
                 wornDisplays.clear();
+                playerBodyYawTracker.clear();
+                playerLastLocationTracker.clear();
             }
             return;
         }
 
-        double backOffset = plugin.getConfig().getDouble("worn-backpack.offset.back", 0.26);
-        double heightOffset = plugin.getConfig().getDouble("worn-backpack.offset.height", 0.60);
-        double sneakHeight = plugin.getConfig().getDouble("worn-backpack.offset.sneak-height", 0.55);
+        double backOffset = plugin.getConfig().getDouble("worn-backpack.offset.back", 0.40);
+        double heightOffset = plugin.getConfig().getDouble("worn-backpack.offset.height", 0.73);
+        double sneakHeight = plugin.getConfig().getDouble("worn-backpack.offset.sneak-height", 0.70);
 
         for (Player player : plugin.getServer().getOnlinePlayers()) {
+            UUID pid = player.getUniqueId();
             if (!player.isValid() || player.isDead()) {
-                ItemDisplay d = wornDisplays.remove(player.getUniqueId());
+                ItemDisplay d = wornDisplays.remove(pid);
                 if (d != null)
                     d.remove();
+                playerBodyYawTracker.remove(pid);
+                playerLastLocationTracker.remove(pid);
                 continue;
             }
 
             ItemStack worn = getWornOrEquippedBackpack(player);
-            UUID pid = player.getUniqueId();
             if (worn != null && isBackpack(worn)) {
                 ItemDisplay display = wornDisplays.get(pid);
                 if (display == null || !display.isValid() || display.getVehicle() != player) {
@@ -1985,6 +2739,7 @@ public final class BackpackService {
                         ent.setPersistent(false);
                         ent.setTeleportDuration(1);
                         ent.setInterpolationDuration(1);
+                        ent.setInterpolationDelay(0);
                         ent.getPersistentDataContainer().set(wornKey, PersistentDataType.BYTE, (byte) 1);
                     });
                     player.addPassenger(display);
@@ -1993,29 +2748,72 @@ public final class BackpackService {
                     display.setItemStack(worn.clone());
                 }
 
-                float headYaw = player.getLocation().getYaw();
-                float bodyYaw = getPlayerBodyYaw(player);
-                float headPitch = player.getLocation().getPitch();
+                                Location currentLoc = player.getLocation();
+                Location lastLoc = playerLastLocationTracker.put(pid, currentLoc);
+                boolean sameWorld = lastLoc != null && currentLoc.getWorld().equals(lastLoc.getWorld());
+                double distSq = sameWorld ? currentLoc.distanceSquared(lastLoc) : 999.0;
+                boolean teleported = !sameWorld || distSq > 64.0;
+                boolean isMoving = sameWorld && distSq > 0.0001;
 
-                // Shortest angular difference between head and body
-                float diffYaw = ((headYaw - bodyYaw + 540.0f) % 360.0f) - 180.0f;
-                float clampedDiff = Math.max(-50.0f, Math.min(50.0f, diffYaw));
+                float headYaw = currentLoc.getYaw();
+                float headPitch = currentLoc.getPitch();
+                org.bukkit.entity.Pose pose = player.getPose();
 
-                // Dynamic smooth blended yaw (torso follows body + flexes towards head)
-                float blendedYaw = bodyYaw + (clampedDiff * 0.40f);
+                boolean isCrawling = (pose == org.bukkit.entity.Pose.SWIMMING && !player.isInWater());
+                boolean isSwimmingWater = (player.isSwimming() || (pose == org.bukkit.entity.Pose.SWIMMING && player.isInWater()));
+                boolean isGliding = (player.isGliding() || pose == org.bukkit.entity.Pose.FALL_FLYING || pose == org.bukkit.entity.Pose.SPIN_ATTACK);
+                boolean isSitting = player.isInsideVehicle();
 
-                // Pitch: Sneak bend + subtle look up/down flex
-                float basePitch = player.isSneaking() ? 15.0f : 0.0f;
-                float blendedPitch = basePitch + (headPitch * 0.12f);
+                Float trackedYaw = playerBodyYawTracker.get(pid);
+                if (trackedYaw == null || teleported) {
+                    trackedYaw = headYaw;
+                }
 
-                display.setRotation(blendedYaw + 180.0f, -blendedPitch);
+                // Continuous motion detection: Whenever player moves (A/D strafe, W/S walk, sprint, jump, crawl, swim, fly, sneak),
+                // the torso directly locks to headYaw with 0ms delay.
+                if (isMoving || player.isSprinting() || isGliding || isSwimmingWater || isCrawling || player.isSneaking()) {
+                    trackedYaw = headYaw;
+                } else if (isSitting && player.getVehicle() != null) {
+                    trackedYaw = player.getVehicle().getLocation().getYaw();
+                } else {
+                    // Standing still: Allow looking around within a 45-degree cone before the back naturally turns
+                    float diff = ((headYaw - trackedYaw + 540.0f) % 360.0f) - 180.0f;
+                    if (diff < -45.0f) {
+                        trackedYaw = headYaw + 45.0f;
+                    } else if (diff > 45.0f) {
+                        trackedYaw = headYaw - 45.0f;
+                    }
+                }
+                playerBodyYawTracker.put(pid, trackedYaw);
 
-                float back = (float) backOffset;
-                float height = (float) (player.isSneaking() ? (sneakHeight - 1.45) : (heightOffset - 1.45));
+                display.setRotation(trackedYaw + 180.0f, 0.0f);
 
-                org.joml.Vector3f translation = new org.joml.Vector3f(0.0f, height, back);
-                org.joml.Quaternionf rotation = new org.joml.Quaternionf()
-                        .rotateX((float) Math.toRadians(blendedPitch));
+                org.joml.Vector3f translation;
+                org.joml.Quaternionf rotation = new org.joml.Quaternionf();
+
+                if (isGliding || isSwimmingWater) {
+                    // Pitch tilts with view direction during diving or climbing
+                    rotation.rotateX((float) Math.toRadians(-headPitch - 90.0f));
+                    org.joml.Vector3f localTorsoOffset = new org.joml.Vector3f(0.0f, -0.20f, -0.15f);
+                    translation = rotation.transform(localTorsoOffset, new org.joml.Vector3f());
+                } else if (isCrawling) {
+                    // Flat horizontal orientation along the spine when crawling
+                    rotation.rotateX((float) Math.toRadians(-90.0f));
+                    org.joml.Vector3f localTorsoOffset = new org.joml.Vector3f(0.0f, -0.20f, -0.15f);
+                    translation = rotation.transform(localTorsoOffset, new org.joml.Vector3f());
+                    translation.y -= 1.05f; // Lower to sit snugly on crawling back
+                } else if (player.isSneaking() || pose == org.bukkit.entity.Pose.SNEAKING) {
+                    float height = (float) (sneakHeight - 1.48);
+                    rotation.rotateX((float) Math.toRadians(-28.6f));
+                    translation = new org.joml.Vector3f(0.0f, height, (float) backOffset + 0.15f);
+                } else if (isSitting) {
+                    float height = (float) (heightOffset - 1.75);
+                    translation = new org.joml.Vector3f(0.0f, height, (float) backOffset);
+                } else {
+                    float height = (float) (heightOffset - 1.45);
+                    translation = new org.joml.Vector3f(0.0f, height - 0.15f, (float) backOffset);
+                }
+
                 org.joml.Vector3f scale = new org.joml.Vector3f(1.0f, 1.0f, 1.0f);
 
                 org.bukkit.util.Transformation trans = new org.bukkit.util.Transformation(
@@ -2028,6 +2826,8 @@ public final class BackpackService {
                 ItemDisplay d = wornDisplays.remove(pid);
                 if (d != null)
                     d.remove();
+                playerBodyYawTracker.remove(pid);
+                playerLastLocationTracker.remove(pid);
             }
         }
     }
@@ -2053,6 +2853,8 @@ public final class BackpackService {
     public void removeWornBackpack(Player player) {
         if (player == null)
             return;
+        playerBodyYawTracker.remove(player.getUniqueId());
+        playerLastLocationTracker.remove(player.getUniqueId());
         ItemDisplay d = wornDisplays.remove(player.getUniqueId());
         if (d != null) {
             d.remove();
@@ -2075,5 +2877,647 @@ public final class BackpackService {
     public void removeAllWornBackpacks() {
         wornDisplays.values().forEach(Entity::remove);
         wornDisplays.clear();
+        playerBodyYawTracker.clear();
+                playerLastLocationTracker.clear();
     }
+
+    // ==================== Furnace Module Logic ====================
+
+    public boolean isFurnaceModule(ItemStack item) {
+        if (item == null || item.getType().isAir() || isEmptyModuleSocket(item))
+            return false;
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
+                if (id != null && (id.startsWith("haohan:furnace_module") || id.startsWith("furnace_module")))
+                    return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        if (item.hasItemMeta()) {
+            ItemMeta meta = item.getItemMeta();
+            if (meta != null && meta.hasItemModel()) {
+                String model = meta.getItemModel().asString();
+                if (model.contains("furnace_module"))
+                    return true;
+            }
+            if (meta != null && meta.hasDisplayName()) {
+                String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(meta.displayName());
+                if (name.contains("Furnace Module") || name.contains("Module Lò Nung"))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    public int getFurnaceModuleTier(ItemStack item) {
+        if (!isFurnaceModule(item))
+            return -1;
+        if (plugin.getServer().getPluginManager().isPluginEnabled("HaoHanItemCore")) {
+            try {
+                String id = vn.haohan.backpack.hook.ItemCoreHook.getItemId(item);
+                if (id != null) {
+                    if (id.endsWith("tier_4") || id.endsWith("tier4")) return 4;
+                    if (id.endsWith("tier_3") || id.endsWith("tier3")) return 3;
+                    if (id.endsWith("tier_2") || id.endsWith("tier2")) return 2;
+                    if (id.endsWith("tier_1") || id.endsWith("tier1")) return 1;
+                    if (id.endsWith("tier_0") || id.endsWith("tier0")) return 0;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (item.hasItemMeta()) {
+            ItemMeta meta = item.getItemMeta();
+            if (meta != null && meta.hasItemModel()) {
+                String model = meta.getItemModel().asString();
+                for (int t = 4; t >= 0; t--) {
+                    if (model.contains("tier_" + t) || model.contains("tier" + t))
+                        return t;
+                }
+            }
+        }
+        return 0;
+    }
+
+    public int getHighestFurnaceTier(Inventory inventory) {
+        if (inventory == null)
+            return -1;
+        BackpackTier tier = getTierFromInventory(inventory);
+        int highest = -1;
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < inventory.getSize()) {
+                ItemStack mod = inventory.getItem(slot);
+                if (mod != null && isFurnaceModule(mod)) {
+                    int t = getFurnaceModuleTier(mod);
+                    if (t > highest)
+                        highest = t;
+                }
+            }
+        }
+        return highest;
+    }
+
+    public boolean hasFurnaceModule(TileState state) {
+        if (state == null)
+            return false;
+        if (!state.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY))
+            return false;
+        byte[] bytes = state.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = BackpackTier.NETHERITE;
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < items.size()) {
+                ItemStack mod = items.get(slot);
+                if (mod != null && isFurnaceModule(mod)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean hasFurnaceModule(Inventory inventory) {
+        return getHighestFurnaceTier(inventory) >= 0;
+    }
+
+    public int getHighestFurnaceTier(ItemStack backpack) {
+        if (backpack == null || !isBackpack(backpack))
+            return -1;
+        UUID id = backpackId(backpack);
+        if (id != null && open.containsKey(id)) {
+            return getHighestFurnaceTier(open.get(id));
+        }
+        ItemMeta meta = backpack.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            return -1;
+        }
+        byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = getBackpackTier(meta);
+        int highest = -1;
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < items.size()) {
+                ItemStack mod = items.get(slot);
+                if (mod != null && isFurnaceModule(mod)) {
+                    int t = getFurnaceModuleTier(mod);
+                    if (t > highest)
+                        highest = t;
+                }
+            }
+        }
+        return highest;
+    }
+
+    public boolean hasFurnaceModule(ItemStack backpack) {
+        return getHighestFurnaceTier(backpack) >= 0;
+    }
+
+    public int getFuelBurnTicks(ItemStack fuel) {
+        if (fuel == null || fuel.getType().isAir())
+            return 0;
+        Material mat = fuel.getType();
+        if (mat == Material.LAVA_BUCKET) return 20000;
+        if (mat == Material.COAL || mat == Material.CHARCOAL) return 1600;
+        if (mat == Material.COAL_BLOCK) return 16000;
+        if (mat == Material.BLAZE_ROD) return 2400;
+        if (mat == Material.DRIED_KELP_BLOCK) return 4000;
+        if (mat == Material.BAMBOO_BLOCK) return 1080;
+        if (mat.name().endsWith("_LOG") || mat.name().endsWith("_WOOD") || mat.name().endsWith("_PLANKS") || mat.name().endsWith("_STEM") || mat.name().endsWith("_HYPHAE")) return 300;
+        if (mat.name().startsWith("WOODEN_") || mat.name().endsWith("_SLAB") || mat.name().endsWith("_STAIRS") || mat.name().endsWith("_PRESSURE_PLATE") || mat.name().endsWith("_BUTTON")) return 150;
+        if (mat == Material.STICK) return 100;
+        if (mat == Material.BAMBOO) return 50;
+        try {
+            if (mat.isFuel()) return 200;
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static final ItemStack NO_SMELT_RESULT = new ItemStack(Material.AIR);
+    private final Map<Material, ItemStack> smeltCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public ItemStack getSmeltResult(ItemStack input) {
+        if (input == null || input.getType().isAir())
+            return null;
+        Material mat = input.getType();
+        ItemStack cached = smeltCache.get(mat);
+        if (cached != null) {
+            return cached.getType().isAir() ? null : cached.clone();
+        }
+
+        ItemStack result = findSmeltingResult(mat);
+        smeltCache.put(mat, result != null ? result.clone() : NO_SMELT_RESULT);
+        return result != null ? result.clone() : null;
+    }
+
+    private ItemStack findSmeltingResult(Material mat) {
+        Material outputMat = switch (mat) {
+            case RAW_IRON, IRON_ORE, DEEPSLATE_IRON_ORE -> Material.IRON_INGOT;
+            case RAW_GOLD, GOLD_ORE, DEEPSLATE_GOLD_ORE, NETHER_GOLD_ORE -> Material.GOLD_INGOT;
+            case RAW_COPPER, COPPER_ORE, DEEPSLATE_COPPER_ORE -> Material.COPPER_INGOT;
+            case COAL_ORE, DEEPSLATE_COAL_ORE -> Material.COAL;
+            case EMERALD_ORE, DEEPSLATE_EMERALD_ORE -> Material.EMERALD;
+            case LAPIS_ORE, DEEPSLATE_LAPIS_ORE -> Material.LAPIS_LAZULI;
+            case DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE -> Material.DIAMOND;
+            case REDSTONE_ORE, DEEPSLATE_REDSTONE_ORE -> Material.REDSTONE;
+            case NETHER_QUARTZ_ORE -> Material.QUARTZ;
+            case ANCIENT_DEBRIS -> Material.NETHERITE_SCRAP;
+            case BEEF -> Material.COOKED_BEEF;
+            case PORKCHOP -> Material.COOKED_PORKCHOP;
+            case CHICKEN -> Material.COOKED_CHICKEN;
+            case MUTTON -> Material.COOKED_MUTTON;
+            case RABBIT -> Material.COOKED_RABBIT;
+            case COD -> Material.COOKED_COD;
+            case SALMON -> Material.COOKED_SALMON;
+            case POTATO -> Material.BAKED_POTATO;
+            case KELP -> Material.DRIED_KELP;
+            case SAND, RED_SAND -> Material.GLASS;
+            case COBBLESTONE -> Material.STONE;
+            case STONE -> Material.SMOOTH_STONE;
+            case SANDSTONE -> Material.SMOOTH_SANDSTONE;
+            case RED_SANDSTONE -> Material.SMOOTH_RED_SANDSTONE;
+            case BASALT -> Material.SMOOTH_BASALT;
+            case QUARTZ_BLOCK -> Material.SMOOTH_QUARTZ;
+            case CLAY_BALL -> Material.BRICK;
+            case CLAY -> Material.TERRACOTTA;
+            case NETHERRACK -> Material.NETHER_BRICK;
+            case CACTUS -> Material.GREEN_DYE;
+            case SEA_PICKLE -> Material.LIME_DYE;
+            case CHORUS_FRUIT -> Material.POPPED_CHORUS_FRUIT;
+            case WET_SPONGE -> Material.SPONGE;
+            default -> null;
+        };
+        if (outputMat != null) {
+            return new ItemStack(outputMat);
+        }
+        if (mat.name().endsWith("_LOG") || mat.name().endsWith("_WOOD") || mat.name().endsWith("_STEM") || mat.name().endsWith("_HYPHAE")) {
+            return new ItemStack(Material.CHARCOAL);
+        }
+
+        try {
+            ItemStack single = new ItemStack(mat);
+            for (java.util.Iterator<Recipe> it = Bukkit.recipeIterator(); it.hasNext(); ) {
+                Recipe r = it.next();
+                if (r instanceof CookingRecipe<?> cooking) {
+                    if (cooking.getInputChoice().test(single)) {
+                        return cooking.getResult().clone();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return null;
+    }
+
+    public static class FurnaceState {
+        public int burnTicksLeft;
+        public int maxBurnTicks;
+        public int cookTicks;
+        public FurnaceState(int burnTicksLeft, int maxBurnTicks, int cookTicks) {
+            this.burnTicksLeft = burnTicksLeft;
+            this.maxBurnTicks = maxBurnTicks;
+            this.cookTicks = cookTicks;
+        }
+    }
+
+    private final Map<UUID, FurnaceState> activeFurnaces = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void tickFurnaceModules() {
+        if (!plugin.getConfig().getBoolean("furnace.enabled", true))
+            return;
+        boolean particles = plugin.getConfig().getBoolean("furnace.particles", true);
+        boolean sound = plugin.getConfig().getBoolean("furnace.sound", true);
+
+        // Process open backpack inventories
+        for (Map.Entry<UUID, Inventory> entry : open.entrySet()) {
+            UUID id = entry.getKey();
+            Inventory inv = entry.getValue();
+            if (inv == null)
+                continue;
+            int furnaceTier = getHighestFurnaceTier(inv);
+            if (furnaceTier < 0)
+                continue;
+            Player viewer = null;
+            if (!inv.getViewers().isEmpty() && inv.getViewers().get(0) instanceof Player p) {
+                viewer = p;
+            }
+            processFurnace(id, inv, viewer, furnaceTier, particles, sound);
+        }
+
+        // Process worn/carried backpacks for online players if not open
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+            if (!player.isValid() || player.isDead())
+                continue;
+            ItemStack worn = getWornOrEquippedBackpack(player);
+            if (worn != null && isBackpack(worn)) {
+                UUID id = backpackId(worn);
+                if (id != null && !open.containsKey(id)) {
+                    int furnaceTier = getHighestFurnaceTier(worn);
+                    if (furnaceTier >= 0) {
+                        processFurnaceItemStack(id, worn, player, furnaceTier, particles, sound);
+                    }
+                }
+            }
+        }
+    }
+
+    private void processFurnaceItemStack(UUID id, ItemStack backpack, Player player, int tierLevel, boolean particles, boolean sound) {
+        ItemMeta meta = backpack.getItemMeta();
+        if (meta == null || !meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY))
+            return;
+        byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+        List<ItemStack> items = deserializeToItems(bytes);
+        BackpackTier tier = getBackpackTier(meta);
+        int inputSlot = tier.getFurnaceInputSlot();
+        int fuelSlot = tier.getFurnaceFuelSlot();
+        if (inputSlot < 0 || fuelSlot < 0 || inputSlot >= items.size() || fuelSlot >= items.size())
+            return;
+
+        ItemStack input = items.get(inputSlot);
+        ItemStack fuel = items.get(fuelSlot);
+        ItemStack smeltResult = (input != null && !input.getType().isAir()) ? getSmeltResult(input) : null;
+
+        FurnaceState state = activeFurnaces.computeIfAbsent(id, k -> new FurnaceState(0, 0, 0));
+
+        int requiredCookTicks = switch (tierLevel) {
+            case 4 -> 10;
+            case 3 -> 25;
+            case 2 -> 50;
+            case 1 -> 100;
+            default -> 200;
+        };
+
+        boolean modified = false;
+
+        if (smeltResult != null) {
+            if (state.burnTicksLeft <= 0) {
+                int fuelBurn = getFuelBurnTicks(fuel);
+                if (fuelBurn > 0) {
+                    if (tierLevel == 4) fuelBurn *= 2;
+                    state.burnTicksLeft = fuelBurn;
+                    state.maxBurnTicks = fuelBurn;
+
+                    if (fuel.getType() == Material.LAVA_BUCKET) {
+                        items.set(fuelSlot, new ItemStack(Material.BUCKET));
+                    } else {
+                        if (fuel.getAmount() > 1) {
+                            fuel.setAmount(fuel.getAmount() - 1);
+                            items.set(fuelSlot, fuel);
+                        } else {
+                            items.set(fuelSlot, null);
+                        }
+                    }
+                    modified = true;
+
+                }
+            }
+
+            if (state.burnTicksLeft > 0) {
+                state.burnTicksLeft -= 5;
+                state.cookTicks += 5;
+
+                if (particles && player != null && (player.getTicksLived() % 10 == 0)) {
+                    Location loc = player.getLocation().add(0, 1.2, 0);
+                    player.getWorld().spawnParticle(Particle.SMOKE, loc, 2, 0.2, 0.2, 0.2, 0.01);
+                    player.getWorld().spawnParticle(Particle.FLAME, loc, 1, 0.1, 0.1, 0.1, 0.01);
+                }
+                // Gentle ambient furnace crackle like a normal furnace only when the GUI is open
+                if (sound && player != null && player.isOnline() && (state.cookTicks % 60 == 0)) {
+                    player.playSound(player.getLocation(), Sound.BLOCK_FURNACE_FIRE_CRACKLE, 0.25f, 1.0f);
+                }
+
+                if (state.cookTicks >= requiredCookTicks) {
+                    state.cookTicks = 0;
+                    if (input.getAmount() > 1) {
+                        input.setAmount(input.getAmount() - 1);
+                        items.set(inputSlot, input);
+                    } else {
+                        items.set(inputSlot, null);
+                    }
+
+                    ItemStack resultToStore = smeltResult.clone();
+                    int maxCap = getMaxStackCapacity(backpack);
+                    boolean stored = autoStoreSmeltedItemList(items, resultToStore, maxCap, tier);
+                    if (!stored && player != null) {
+                        player.getWorld().dropItemNaturally(player.getLocation(), resultToStore);
+                    }
+                    modified = true;
+
+                }
+            }
+        } else {
+            if (state.burnTicksLeft > 0) {
+                state.burnTicksLeft -= 5;
+            }
+            state.cookTicks = 0;
+        }
+
+        if (modified) {
+            byte[] updatedBytes = serializeItems(items);
+            meta.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, updatedBytes);
+            backpack.setItemMeta(meta);
+        }
+    }
+
+    private void processFurnace(UUID id, Inventory inv, Player player, int tierLevel, boolean particles, boolean sound) {
+        BackpackTier tier = getTierFromInventory(inv);
+        int inputSlot = tier.getFurnaceInputSlot();
+        int fuelSlot = tier.getFurnaceFuelSlot();
+        if (inputSlot < 0 || fuelSlot < 0 || inputSlot >= inv.getSize() || fuelSlot >= inv.getSize())
+            return;
+
+        ItemStack input = inv.getItem(inputSlot);
+        ItemStack fuel = inv.getItem(fuelSlot);
+        ItemStack smeltResult = (input != null && !input.getType().isAir()) ? getSmeltResult(input) : null;
+
+        FurnaceState state = activeFurnaces.computeIfAbsent(id, k -> new FurnaceState(0, 0, 0));
+
+        int requiredCookTicks = switch (tierLevel) {
+            case 4 -> 10;
+            case 3 -> 25;
+            case 2 -> 50;
+            case 1 -> 100;
+            default -> 200;
+        };
+
+        if (smeltResult != null) {
+            if (state.burnTicksLeft <= 0) {
+                int fuelBurn = getFuelBurnTicks(fuel);
+                if (fuelBurn > 0) {
+                    if (tierLevel == 4) fuelBurn *= 2;
+                    state.burnTicksLeft = fuelBurn;
+                    state.maxBurnTicks = fuelBurn;
+
+                    if (fuel.getType() == Material.LAVA_BUCKET) {
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, fuelSlot, new ItemStack(Material.BUCKET));
+                    } else {
+                        if (fuel.getAmount() > 1) {
+                            fuel.setAmount(fuel.getAmount() - 1);
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, fuelSlot, fuel);
+                        } else {
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, fuelSlot, null);
+                        }
+                    }
+                    if (player != null && player.isOnline() && player.getOpenInventory().getTopInventory().equals(inv)) {
+                        vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(player, fuelSlot, inv.getItem(fuelSlot));
+                    }
+
+                }
+            }
+
+            if (state.burnTicksLeft > 0) {
+                state.burnTicksLeft -= 5;
+                state.cookTicks += 5;
+
+                if (particles && player != null && (player.getTicksLived() % 10 == 0)) {
+                    Location loc = player.getLocation().add(0, 1.2, 0);
+                    player.getWorld().spawnParticle(Particle.SMOKE, loc, 2, 0.2, 0.2, 0.2, 0.01);
+                    player.getWorld().spawnParticle(Particle.FLAME, loc, 1, 0.1, 0.1, 0.1, 0.01);
+                }
+                // Gentle ambient furnace crackle like a normal furnace only when the GUI is open
+                if (sound && player != null && player.isOnline() && (state.cookTicks % 60 == 0)) {
+                    player.playSound(player.getLocation(), Sound.BLOCK_FURNACE_FIRE_CRACKLE, 0.25f, 1.0f);
+                }
+
+                if (state.cookTicks >= requiredCookTicks) {
+                    state.cookTicks = 0;
+                    if (input.getAmount() > 1) {
+                        input.setAmount(input.getAmount() - 1);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, inputSlot, input);
+                    } else {
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, inputSlot, null);
+                    }
+                    if (player != null && player.isOnline() && player.getOpenInventory().getTopInventory().equals(inv)) {
+                        vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(player, inputSlot, inv.getItem(inputSlot));
+                    }
+
+                    ItemStack resultToStore = smeltResult.clone();
+                    int maxCap = getMaxStackCapacity(inv);
+                    boolean stored = autoStoreSmeltedItem(inv, resultToStore, maxCap, tier);
+                    if (!stored && player != null) {
+                        player.getWorld().dropItemNaturally(player.getLocation(), resultToStore);
+                    }
+
+                }
+            }
+        } else {
+            if (state.burnTicksLeft > 0) {
+                state.burnTicksLeft -= 5;
+            }
+            state.cookTicks = 0;
+        }
+
+        // Send real-time tooltip progress update packet to viewers
+        if (player != null && player.isOnline() && player.getOpenInventory().getTopInventory().equals(inv)) {
+            ItemStack inputCur = inv.getItem(inputSlot);
+            ItemStack fuelCur = inv.getItem(fuelSlot);
+            ItemStack dispInput = createSmeltDisplayItem(inputCur, smeltResult, state.cookTicks, requiredCookTicks, state.burnTicksLeft > 0, tierLevel);
+            ItemStack dispFuel = createFuelDisplayItem(fuelCur, state.burnTicksLeft, state.maxBurnTicks, tierLevel);
+            vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(player, inputSlot, dispInput != null ? dispInput : inputCur);
+            vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(player, fuelSlot, dispFuel != null ? dispFuel : fuelCur);
+        }
+    }
+
+    public static String formatProgressBar(int current, int max, int totalBars, String fillChar, String emptyChar) {
+        if (max <= 0) return "§7[----------] §e0%";
+        float percent = Math.min(1.0f, Math.max(0.0f, (float) current / max));
+        int filledBars = Math.round(percent * totalBars);
+        StringBuilder sb = new StringBuilder("§6[§a");
+        for (int i = 0; i < filledBars; i++) sb.append(fillChar);
+        sb.append("§8");
+        for (int i = filledBars; i < totalBars; i++) sb.append(emptyChar);
+        sb.append("§6] §e").append(Math.round(percent * 100)).append("%");
+        return sb.toString();
+    }
+
+    public ItemStack createSmeltDisplayItem(ItemStack rawItem, ItemStack resultItem, int cookTicks, int requiredTicks, boolean isBurning, int tierLevel) {
+        if (rawItem == null || rawItem.getType().isAir()) return null;
+        ItemStack display = rawItem.clone();
+        ItemMeta meta = display.getItemMeta();
+        if (meta == null) return display;
+
+        List<net.kyori.adventure.text.Component> lore = meta.hasLore() ? new ArrayList<>(meta.lore()) : new ArrayList<>();
+        lore.add(Component.text("§8§m------------------------"));
+        if (resultItem != null) {
+            String resultName = resultItem.getItemMeta() != null && resultItem.getItemMeta().hasDisplayName() ?
+                    net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(resultItem.getItemMeta().displayName()) :
+                    resultItem.getType().name().replace('_', ' ').toLowerCase(java.util.Locale.ROOT);
+            if (isBurning) {
+                float cookSec = Math.max(0.0f, (float) cookTicks / 20.0f);
+                float totalSec = (float) requiredTicks / 20.0f;
+                lore.add(Component.text("§e⚡ Tiến độ nung: " + formatProgressBar(cookTicks, requiredTicks, 10, "■", "□")));
+                lore.add(Component.text(String.format(java.util.Locale.ROOT, "§7⏱ Thời gian: §f%.1fs §7/ §e%.1fs", cookSec, totalSec)));
+                lore.add(Component.text("§7🔥 Đang nung ra: §a" + resultName));
+            } else {
+                lore.add(Component.text("§c⌛ Đang chờ nhiên liệu đốt..."));
+                lore.add(Component.text("§7Thành phẩm: §a" + resultName));
+            }
+        } else {
+            lore.add(Component.text("§c❌ Vật phẩm này không thể nung"));
+        }
+        lore.add(Component.text("§8§m------------------------"));
+        meta.lore(lore);
+        display.setItemMeta(meta);
+        return display;
+    }
+
+    public ItemStack createFuelDisplayItem(ItemStack rawFuel, int burnTicksLeft, int maxBurnTicks, int tierLevel) {
+        if (rawFuel == null || rawFuel.getType().isAir()) return null;
+        ItemStack display = rawFuel.clone();
+        ItemMeta meta = display.getItemMeta();
+        if (meta == null) return display;
+
+        List<net.kyori.adventure.text.Component> lore = meta.hasLore() ? new ArrayList<>(meta.lore()) : new ArrayList<>();
+        lore.add(Component.text("§8§m------------------------"));
+        if (burnTicksLeft > 0) {
+            float burnSec = (float) burnTicksLeft / 20.0f;
+            float maxSec = (float) maxBurnTicks / 20.0f;
+            lore.add(Component.text("§6🔥 Lửa đang cháy: " + formatProgressBar(burnTicksLeft, maxBurnTicks, 10, "■", "□")));
+            lore.add(Component.text(String.format(java.util.Locale.ROOT, "§7⏱ Thời gian còn: §e%.1fs §7/ §f%.1fs", burnSec, maxSec)));
+            if (tierLevel == 4) {
+                lore.add(Component.text("§d✨ Hiệu suất Netherite: §a-50% nhiên liệu"));
+            }
+        } else {
+            int singleBurn = getFuelBurnTicks(rawFuel);
+            if (singleBurn > 0) {
+                if (tierLevel == 4) singleBurn *= 2;
+                lore.add(Component.text(String.format(java.util.Locale.ROOT, "§7⏱ Thời gian cháy 1 viên: §e%.1fs", (float) singleBurn / 20.0f)));
+                if (tierLevel == 4) {
+                    lore.add(Component.text("§d✨ Hiệu suất Netherite: §a-50% nhiên liệu"));
+                }
+            } else {
+                lore.add(Component.text("§c❌ Không phải nhiên liệu đốt hợp lệ"));
+            }
+        }
+        lore.add(Component.text("§8§m------------------------"));
+        meta.lore(lore);
+        display.setItemMeta(meta);
+        return display;
+    }
+
+    public boolean autoStoreSmeltedItem(Inventory inv, ItemStack item, int maxCap, BackpackTier tier) {
+        if (item == null || item.getType().isAir())
+            return true;
+        int[] dynamicSlots = tier.getStorageSlots();
+
+        for (int slot : dynamicSlots) {
+            if (tier.isModuleSlot(slot) || tier.isDiscSlot(slot) || tier.isFurnaceSlot(slot))
+                continue;
+            if (slot >= inv.getSize())
+                continue;
+            ItemStack existing = inv.getItem(slot);
+            if (existing != null && isSimilarIgnoringCustomStack(existing, item) && existing.getAmount() < maxCap) {
+                int space = maxCap - existing.getAmount();
+                int move = Math.min(space, item.getAmount());
+                ItemStack updated = existing.clone();
+                updated.setAmount(existing.getAmount() + move);
+                applyCustomStackSize(updated, maxCap);
+                vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, slot, updated);
+                if (!inv.getViewers().isEmpty() && inv.getViewers().get(0) instanceof Player viewer) {
+                    vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(viewer, slot, updated);
+                }
+                item.setAmount(item.getAmount() - move);
+                if (item.getAmount() <= 0)
+                    return true;
+            }
+        }
+
+        for (int slot : dynamicSlots) {
+            if (tier.isModuleSlot(slot) || tier.isDiscSlot(slot) || tier.isFurnaceSlot(slot))
+                continue;
+            if (slot >= inv.getSize())
+                continue;
+            ItemStack existing = inv.getItem(slot);
+            if (existing == null || existing.getType().isAir()) {
+                ItemStack placed = item.clone();
+                applyCustomStackSize(placed, maxCap);
+                vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inv, slot, placed);
+                if (!inv.getViewers().isEmpty() && inv.getViewers().get(0) instanceof Player viewer) {
+                    vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(viewer, slot, placed);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean autoStoreSmeltedItemList(List<ItemStack> items, ItemStack item, int maxCap, BackpackTier tier) {
+        if (item == null || item.getType().isAir())
+            return true;
+        int[] dynamicSlots = tier.getStorageSlots();
+
+        for (int slot : dynamicSlots) {
+            if (tier.isModuleSlot(slot) || tier.isDiscSlot(slot) || tier.isFurnaceSlot(slot))
+                continue;
+            if (slot >= items.size())
+                continue;
+            ItemStack existing = items.get(slot);
+            if (existing != null && isSimilarIgnoringCustomStack(existing, item) && existing.getAmount() < maxCap) {
+                int space = maxCap - existing.getAmount();
+                int move = Math.min(space, item.getAmount());
+                ItemStack updated = existing.clone();
+                updated.setAmount(existing.getAmount() + move);
+                applyCustomStackSize(updated, maxCap);
+                items.set(slot, updated);
+                item.setAmount(item.getAmount() - move);
+                if (item.getAmount() <= 0)
+                    return true;
+            }
+        }
+
+        for (int slot : dynamicSlots) {
+            if (tier.isModuleSlot(slot) || tier.isDiscSlot(slot) || tier.isFurnaceSlot(slot))
+                continue;
+            if (slot >= items.size())
+                continue;
+            ItemStack existing = items.get(slot);
+            if (existing == null || existing.getType().isAir()) {
+                ItemStack placed = item.clone();
+                applyCustomStackSize(placed, maxCap);
+                items.set(slot, placed);
+                return true;
+            }
+        }
+        return false;
+    }
+
 }

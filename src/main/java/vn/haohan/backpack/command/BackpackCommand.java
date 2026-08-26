@@ -19,6 +19,8 @@ public final class BackpackCommand implements BasicCommand {
     private static final List<CommandInfo> COMMANDS = List.of(
             new CommandInfo("unequip", null, "/hhbp unequip (tháo ba lô đeo sau lưng)"),
             new CommandInfo("give", "haohanbackpack.give", "/hhbp give <người chơi> <số lượng>"),
+            new CommandInfo("givemodule", "haohanbackpack.admin", "/hhbp givemodule <người chơi> <module_id> [số lượng]"),
+            new CommandInfo("get", "haohanbackpack.admin", "/hhbp get <item_id> [số lượng]"),
             new CommandInfo("list", null, "/hhbp list"),
             new CommandInfo("info", "haohanbackpack.admin", "/hhbp info <người chơi>"),
             new CommandInfo("delete", "haohanbackpack.admin", "/hhbp delete <người chơi>"),
@@ -62,11 +64,70 @@ public final class BackpackCommand implements BasicCommand {
         switch (command.name()) {
             case "unequip" -> unequip(sender);
             case "give" -> give(sender, args);
+            case "givemodule" -> giveModule(sender, args);
+            case "get" -> getItem(sender, args);
             case "list" -> list(sender, args);
             case "info" -> info(sender, args);
             case "delete" -> delete(sender, args);
             case "reload" -> reload(sender, args);
         }
+    }
+
+    private static final List<String> ALL_ITEMS = List.of(
+            "storage_module", "magnet_module", "jukebox_module",
+            "furnace_module_tier_0", "furnace_module_tier_1", "furnace_module_tier_2", "furnace_module_tier_3", "furnace_module_tier_4",
+            "upgrade_tier_0", "upgrade_tier_1", "upgrade_tier_2", "upgrade_tier_3", "upgrade_tier_4",
+            "backpack_leather", "backpack_iron", "backpack_gold", "backpack_diamond", "backpack_netherite"
+    );
+
+    private void getItem(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(PREFIX + "§cLệnh này chỉ dành cho người chơi.");
+            return;
+        }
+        if (!requireArgs(sender, args, 2, usage("get"))) return;
+        String rawId = args[1].toLowerCase(Locale.ROOT);
+        String fullId = rawId.startsWith("haohan:") ? rawId : "haohan:" + rawId;
+        int amount = 1;
+        if (args.length >= 3) {
+            try { amount = Integer.parseInt(args[2]); } catch (Exception ignored) {}
+        }
+        ItemStack item = vn.haohan.backpack.hook.ItemCoreHook.createItem(fullId);
+        if (item == null) {
+            sender.sendMessage(PREFIX + "§cKhông tìm thấy item: " + fullId);
+            return;
+        }
+        item.setAmount(amount);
+        for (ItemStack leftover : player.getInventory().addItem(item).values()) {
+            player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+        }
+        sender.sendMessage(PREFIX + "§a✔ Đã nhận " + amount + "x §e" + fullId);
+    }
+
+    private void giveModule(CommandSender sender, String[] args) {
+        if (!requireArgs(sender, args, 3, usage("givemodule"))) return;
+        Player target = Bukkit.getPlayerExact(args[1]);
+        if (target == null) {
+            sender.sendMessage(PREFIX + "§cKhông tìm thấy người chơi: " + args[1]);
+            return;
+        }
+        String rawId = args[2].toLowerCase(Locale.ROOT);
+        String fullId = rawId.startsWith("haohan:") ? rawId : "haohan:" + rawId;
+        int amount = 1;
+        if (args.length >= 4) {
+            try { amount = Integer.parseInt(args[3]); } catch (Exception ignored) {}
+        }
+        ItemStack item = vn.haohan.backpack.hook.ItemCoreHook.createItem(fullId);
+        if (item == null) {
+            sender.sendMessage(PREFIX + "§cKhông tìm thấy module/item: " + fullId);
+            return;
+        }
+        item.setAmount(amount);
+        for (ItemStack leftover : target.getInventory().addItem(item).values()) {
+            target.getWorld().dropItemNaturally(target.getLocation(), leftover);
+        }
+        sender.sendMessage(PREFIX + "§a✔ Đã give " + amount + "x §e" + fullId + " §acho " + target.getName());
+        target.sendMessage(PREFIX + "§aBạn nhận được " + amount + "x §e" + fullId);
     }
 
     private void unequip(CommandSender sender) {
@@ -151,6 +212,11 @@ public final class BackpackCommand implements BasicCommand {
         if (command == null || !hasPermission(sender, command.permission())) return List.of();
         if (command.name().equals("give") && args.length == 2) return matchingPlayers(args[1]);
         if (command.name().equals("give") && args.length == 3) return matching(args[2], List.of("1", "5", "10"));
+        if (command.name().equals("givemodule") && args.length == 2) return matchingPlayers(args[1]);
+        if (command.name().equals("givemodule") && args.length == 3) return matching(args[2], ALL_ITEMS);
+        if (command.name().equals("givemodule") && args.length == 4) return matching(args[3], List.of("1", "4", "16", "64"));
+        if (command.name().equals("get") && args.length == 2) return matching(args[1], ALL_ITEMS);
+        if (command.name().equals("get") && args.length == 3) return matching(args[2], List.of("1", "4", "16", "64"));
         if ((command.name().equals("info") || command.name().equals("delete")) && args.length == 2) return matchingPlayers(args[1]);
         return List.of();
     }
