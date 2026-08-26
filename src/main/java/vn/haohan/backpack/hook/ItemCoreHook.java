@@ -1,8 +1,8 @@
 package vn.haohan.backpack.hook;
 
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
+import vn.haohan.backpack.tier.BackpackTier;
 import vn.haohan.itemcore.api.HaoHanItemCore;
 import vn.haohan.itemcore.api.item.ItemDefinition;
 import vn.haohan.itemcore.api.item.ItemType;
@@ -20,38 +20,32 @@ public final class ItemCoreHook {
     public static void register() {
         var core = HaoHanItemCore.get();
 
-        if (!core.getItemService().exists("haohan:backpack")) {
-            core.getItemRegistry().register(ItemDefinition.builder("haohan:backpack")
-                    .material(Material.BROWN_DYE).displayName("Backpack").maxStackSize(1)
-                    .type(ItemType.SPECIAL).model("haohan:backpack")
-                    .addLore("&7Chuột phải để mở ba lô cá nhân.").addLore("&8Dung lượng: 53 ô + 1 module").build());
-        }
-
+        // 1. Register Storage Module
         if (!core.getItemService().exists("haohan:storage_module")) {
             core.getItemRegistry().register(ItemDefinition.builder("haohan:storage_module")
                     .material(Material.PAPER).displayName("§eStorage Module").maxStackSize(64)
                     .type(ItemType.MACHINE_COMPONENT).model("haohan:storage_module")
-                    .addLore("&7Module lưu trữ dùng để chế tạo hoặc")
-                    .addLore("&7nâng cấp ba lô.").build());
+                    .addLore("§7Module lưu trữ dùng để chế tạo hoặc")
+                    .addLore("§7nâng cấp ba lô.").build());
         }
 
-        // 5 Tier Upgrades: Tier 0 (Copper), Tier 1 (Iron), Tier 2 (Emerald), Tier 3 (Diamond), Tier 4 (Netherite)
-        record UpgradeTier(String id, String name, String lore, Material cornerMat, String prevId) {}
-        List<UpgradeTier> tiers = List.of(
-                new UpgradeTier("haohan:upgrade_tier_0", "§6Nâng cấp Ba Lô (Tier 0 - Đồng)", "&7Tăng giới hạn stack trong ba lô lên: &e128", Material.COPPER_INGOT, "haohan:storage_module"),
-                new UpgradeTier("haohan:upgrade_tier_1", "§fNâng cấp Ba Lô (Tier 1 - Sắt)", "&7Tăng giới hạn stack trong ba lô lên: &e192", Material.IRON_INGOT, "haohan:upgrade_tier_0"),
-                new UpgradeTier("haohan:upgrade_tier_2", "§aNâng cấp Ba Lô (Tier 2 - Emerald)", "&7Tăng giới hạn stack trong ba lô lên: &e320", Material.EMERALD, "haohan:upgrade_tier_1"),
-                new UpgradeTier("haohan:upgrade_tier_3", "§bNâng cấp Ba Lô (Tier 3 - Kim cương)", "&7Tăng giới hạn stack trong ba lô lên: &e448", Material.DIAMOND, "haohan:upgrade_tier_2"),
-                new UpgradeTier("haohan:upgrade_tier_4", "§5Nâng cấp Ba Lô (Tier 4 - Netherite)", "&7Tăng giới hạn stack trong ba lô lên: &e512", Material.NETHERITE_INGOT, "haohan:upgrade_tier_3")
+        // 2. Register 5 Tier Stack Upgrades (Tier 0 -> Tier 4)
+        record StackUpgradeTier(String id, String name, String lore, Material cornerMat, String prevId) {}
+        List<StackUpgradeTier> stackTiers = List.of(
+                new StackUpgradeTier("haohan:upgrade_tier_0", "§6Nâng cấp Ba Lô (Tier 0 - Đồng)", "§7Tăng giới hạn stack trong ba lô lên: §e128", Material.COPPER_INGOT, "haohan:storage_module"),
+                new StackUpgradeTier("haohan:upgrade_tier_1", "§fNâng cấp Ba Lô (Tier 1 - Sắt)", "§7Tăng giới hạn stack trong ba lô lên: §e192", Material.IRON_INGOT, "haohan:upgrade_tier_0"),
+                new StackUpgradeTier("haohan:upgrade_tier_2", "§aNâng cấp Ba Lô (Tier 2 - Emerald)", "§7Tăng giới hạn stack trong ba lô lên: §e320", Material.EMERALD, "haohan:upgrade_tier_1"),
+                new StackUpgradeTier("haohan:upgrade_tier_3", "§bNâng cấp Ba Lô (Tier 3 - Kim cương)", "§7Tăng giới hạn stack trong ba lô lên: §e448", Material.DIAMOND, "haohan:upgrade_tier_2"),
+                new StackUpgradeTier("haohan:upgrade_tier_4", "§5Nâng cấp Ba Lô (Tier 4 - Netherite)", "§7Tăng giới hạn stack trong ba lô lên: §e512", Material.NETHERITE_INGOT, "haohan:upgrade_tier_3")
         );
 
-        for (UpgradeTier tier : tiers) {
+        for (StackUpgradeTier tier : stackTiers) {
             if (!core.getItemService().exists(tier.id)) {
                 core.getItemRegistry().register(ItemDefinition.builder(tier.id)
                         .material(Material.PAPER).displayName(tier.name).maxStackSize(16)
                         .type(ItemType.MACHINE_COMPONENT).model(tier.id)
                         .addLore(tier.lore)
-                        .addLore("&8Đặt vào ô Module trong ba lô để kích hoạt.")
+                        .addLore("§8Đặt vào ô Module trong ba lô để kích hoạt.")
                         .build());
             }
 
@@ -75,7 +69,45 @@ public final class ItemCoreHook {
             }
         }
 
-        if (!core.getRecipeRegistry().exists("haohan:backpack_craft")) {
+        // 3. Register All 5 Backpack Tiers & Colored Variants
+        for (BackpackTier tier : BackpackTier.values()) {
+            String baseId = "haohan:backpack_" + tier.getId();
+            String defaultModel = "haohan:backpack_" + tier.getId();
+
+            if (!core.getItemService().exists(baseId)) {
+                core.getItemRegistry().register(ItemDefinition.builder(baseId)
+                        .material(Material.BROWN_DYE).displayName(tier.getDisplayName()).maxStackSize(1)
+                        .type(ItemType.SPECIAL).model(defaultModel)
+                        .addLore("§7Cấp bậc: " + tier.getDisplayName())
+                        .addLore("§7Sức chứa: §e" + tier.getStorageSlotsCount() + " ô + " + tier.getModuleSlotsCount() + " module")
+                        .addLore("")
+                        .addLore("§7Chuột phải để mở ba lô cá nhân.")
+                        .build());
+            }
+
+            // Colored variants for each tier
+            for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
+                String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
+                String coloredId = "haohan:backpack_" + tier.getId() + "_" + colorName;
+                String coloredModel = "haohan:backpack_" + tier.getId() + "_" + colorName;
+
+                if (!core.getItemService().exists(coloredId)) {
+                    core.getItemRegistry().register(ItemDefinition.builder(coloredId)
+                            .material(Material.BROWN_DYE).displayName(tier.getDisplayName()).maxStackSize(1)
+                            .type(ItemType.SPECIAL).model(coloredModel)
+                            .addLore("§7Cấp bậc: " + tier.getDisplayName())
+                            .addLore("§7Đã nhuộm: " + getFriendlyColorName(colorName))
+                            .addLore("§7Sức chứa: §e" + tier.getStorageSlotsCount() + " ô + " + tier.getModuleSlotsCount() + " module")
+                            .addLore("")
+                            .addLore("§7Chuột phải để mở ba lô cá nhân.")
+                            .build());
+                }
+            }
+        }
+
+        // 4. Recipes for Backpack Tiers
+        // Leather Backpack Craft
+        if (!core.getRecipeRegistry().exists("haohan:backpack_leather_craft")) {
             Map<Character, Ingredient> ingMap = new HashMap<>();
             ingMap.put('I', new Ingredient.MaterialIngredient(Material.IRON_INGOT));
             ingMap.put('M', new Ingredient.ItemIngredient("haohan:storage_module"));
@@ -84,33 +116,70 @@ public final class ItemCoreHook {
             ingMap.put('L', new Ingredient.MaterialIngredient(Material.LEATHER));
 
             core.getRecipeRegistry().register(new ShapedRecipeDefinition(
-                    "haohan:backpack_craft",
+                    "haohan:backpack_leather_craft",
                     List.of(
                             "IMI",
                             "SCS",
                             "LLL"
                     ),
                     ingMap,
-                    new ItemResult("haohan:backpack", 1)
+                    new ItemResult("haohan:backpack_leather", 1)
             ));
         }
 
-        for (org.bukkit.DyeColor dye : org.bukkit.DyeColor.values()) {
-            String colorName = dye.name().toLowerCase(java.util.Locale.ROOT);
-            String id = "haohan:backpack_" + colorName;
-            if (!core.getItemService().exists(id)) {
-                core.getItemRegistry().register(ItemDefinition.builder(id)
-                        .material(Material.BROWN_DYE).displayName("Backpack").maxStackSize(1)
-                        .type(ItemType.SPECIAL).model(id)
-                        .addLore("&7Chuột phải để mở ba lô cá nhân.").addLore("&8Dung lượng: 53 ô + 1 module").build());
+        // Tier upgrades (Leather -> Iron -> Gold -> Diamond -> Netherite)
+        for (BackpackTier tier : BackpackTier.values()) {
+            if (tier.getPrevTierId() != null) {
+                String recipeKey = "haohan:backpack_" + tier.getId() + "_upgrade";
+                if (!core.getRecipeRegistry().exists(recipeKey)) {
+                    Map<Character, Ingredient> ingMap = new HashMap<>();
+                    ingMap.put('M', new Ingredient.MaterialIngredient(tier.getUpgradeMaterial()));
+                    ingMap.put('B', new Ingredient.ItemIngredient(tier.getPrevTierId()));
+
+                    core.getRecipeRegistry().register(new ShapedRecipeDefinition(
+                            recipeKey,
+                            List.of(
+                                    "MMM",
+                                    "MBM",
+                                    "MMM"
+                            ),
+                            ingMap,
+                            new ItemResult("haohan:backpack_" + tier.getId(), 1)
+                    ));
+                }
             }
         }
+    }
+
+    public static String getFriendlyColorName(String colorName) {
+        return switch (colorName) {
+            case "white" -> "§fTrắng";
+            case "orange" -> "§6Cam";
+            case "magenta" -> "§dĐỏ sẫm";
+            case "light_blue" -> "§bXanh nước biển nhạt";
+            case "yellow" -> "§eVàng";
+            case "lime" -> "§aXanh lá mạ";
+            case "pink" -> "§dHồng";
+            case "gray" -> "§8Xám";
+            case "light_gray" -> "§7Xám nhạt";
+            case "cyan" -> "§3Xanh lục lam";
+            case "purple" -> "§5Tím";
+            case "blue" -> "§9Xanh nước biển";
+            case "brown" -> "§6Nâu";
+            case "green" -> "§2Xanh lá cây";
+            case "red" -> "§cĐỏ";
+            case "black" -> "§8Đen";
+            default -> "§f" + colorName;
+        };
     }
 
     public static ItemStack createItem(String id) {
         var service = HaoHanItemCore.get().getItemService();
         if (service.exists(id)) {
             return service.create(id);
+        }
+        if (id.equals("haohan:backpack") && service.exists("haohan:backpack_leather")) {
+            return service.create("haohan:backpack_leather");
         }
         return null;
     }

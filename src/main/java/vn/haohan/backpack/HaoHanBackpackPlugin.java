@@ -23,7 +23,7 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
         registerCommand("backpack", java.util.List.of("hhbp", "bp", "balo"), command);
         getServer().getPluginManager().registerEvents(new BackpackListener(this, backpackService), this);
 
-        getServer().getScheduler().runTaskTimer(this, () -> getServer().getOnlinePlayers().forEach(backpackService::updateWornBackpack), 20L, 20L);
+        getServer().getScheduler().runTaskTimer(this, backpackService::tickWornBackpacks, 1L, 1L);
         getServer().getScheduler().runTaskTimer(this, backpackService::checkCauldrons, 5L, 5L);
         getServer().getOnlinePlayers().forEach(backpackService::discoverRecipes);
 
@@ -33,6 +33,7 @@ public final class HaoHanBackpackPlugin extends JavaPlugin {
     @Override
     public void onDisable() {
         if (backpackService != null) {
+            backpackService.removeAllWornBackpacks();
             getServer().getOnlinePlayers().forEach(backpackService::removeWornBackpack);
             backpackService.saveAllOpenBackpacks();
             backpackService.closeDatabase();

@@ -1,6 +1,8 @@
 package vn.haohan.backpack.listener;
 
 import org.bukkit.entity.Player;
+import org.bukkit.entity.ItemDisplay;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
@@ -8,10 +10,12 @@ import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
@@ -274,41 +278,107 @@ public final class BackpackListener implements Listener {
 
     @EventHandler public void onUse(PlayerInteractEvent event) {
         if (event.getHand() != EquipmentSlot.HAND || (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK)) return;
+        Player player = event.getPlayer();
+
         if (event.getAction() == Action.RIGHT_CLICK_BLOCK && event.getClickedBlock() != null && service.isPlacedBackpack(event.getClickedBlock())) {
             event.setCancelled(true); service.openAt(event.getPlayer(), event.getClickedBlock().getLocation()); return;
         }
-        if (!service.isBackpack(event.getItem())) return;
 
-        Player player = event.getPlayer();
+        ItemStack held = event.getItem();
 
-        // 1. Right click WATER_CAULDRON -> BLEACH / CLEAR BACKPACK COLOR
+        // 1. Shift + Right Click with EMPTY HAND -> Open Worn or Equipped Backpack
+        if (held == null || held.getType().isAir()) {
+            if (player.isSneaking()) {
+                ItemStack backpack = service.getWornOrEquippedBackpack(player);
+                if (backpack != null && service.isBackpack(backpack)) {
+                    event.setCancelled(true);
+                    service.openItem(player, backpack);
+                }
+            }
+            return;
+        }
+
+        if (!service.isBackpack(held)) return;
+
+        // 2. Right click WATER_CAULDRON -> BLEACH / CLEAR BACKPACK COLOR
         if (event.getAction() == Action.RIGHT_CLICK_BLOCK && event.getClickedBlock() != null && event.getClickedBlock().getType() == Material.WATER_CAULDRON) {
-            if (service.getBackpackColor(event.getItem()) != null) {
+            if (service.getBackpackColor(held) != null) {
                 event.setCancelled(true);
                 if (service.consumeCauldronLevel(event.getClickedBlock())) {
-                    service.clearBackpackColor(event.getItem());
+                    service.clearBackpackColor(held);
                     player.updateInventory();
                 }
                 return;
             }
         }
 
-        // 2. Sneak + Right click BLOCK -> PLACE BACKPACK ON GROUND
+        // 3. Sneak + Right Click AIR -> QUICK EQUIP BACKPACK TO VIRTUAL ACCESSORY SLOT
+        if (player.isSneaking() && event.getAction() == Action.RIGHT_CLICK_AIR) {
+            event.setCancelled(true);
+
+            ItemStack currentEquipped = service.getEquippedBackpack(player);
+            if (currentEquipped != null && service.isBackpack(currentEquipped)) {
+                player.sendMessage(Component.text("§c❌ Bạn đã đang đeo một chiếc ba lô sau lưng rồi!"));
+                player.sendMessage(Component.text("§7Hãy gõ lệnh §f/bp unequip §7để tháo ba lô hiện tại trước khi đeo cái mới."));
+                player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                return;
+            }
+
+            ItemStack toEquip = held.clone();
+            toEquip.setAmount(1);
+
+            // Equip to virtual accessory backpack slot (Chestplate armor stays untouched!)
+            service.setEquippedBackpack(player, toEquip);
+            if (player.getGameMode() != GameMode.CREATIVE) {
+                if (held.getAmount() > 1) {
+                    held.setAmount(held.getAmount() - 1);
+                } else {
+                    if (event.getHand() == EquipmentSlot.HAND) {
+                        player.getInventory().setItemInMainHand(null);
+                    } else {
+                        player.getInventory().setItemInOffHand(null);
+                    }
+                }
+            }
+            player.sendMessage(Component.text("§a✔ Đã trang bị ba lô sau lưng! Bạn có thể vừa mặc giáp vừa đeo ba lô."));
+            player.sendMessage(Component.text("§7(Nhấn §fShift + F §7hoặc gõ §f/bp §7để mở, gõ §f/bp unequip §7để tháo)"));
+
+            player.playSound(player.getLocation(), Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                service.updateWornBackpack(player);
+                player.updateInventory();
+            });
+            return;
+        }
+
+        // 4. Sneak + Right click BLOCK -> PLACE BACKPACK ON GROUND
         if (event.getAction() == Action.RIGHT_CLICK_BLOCK && player.isSneaking()) {
             Block clicked = event.getClickedBlock();
             Block target = clicked == null ? null : clicked.getRelative(event.getBlockFace());
             if (target == null || !target.getType().isAir() || service.hasPlacedBackpackAt(target)) return;
             event.setCancelled(true);
-            service.spawnPlacedBackpack(target, event.getItem().clone(), event.getPlayer().getLocation().getYaw());
+            service.spawnPlacedBackpack(target, held.clone(), event.getPlayer().getLocation().getYaw());
             if (player.getGameMode() != GameMode.CREATIVE) {
-                event.getItem().setAmount(event.getItem().getAmount() - 1);
+                held.setAmount(held.getAmount() - 1);
             }
             return;
         }
 
-        // 2. All other right clicks (air with/without sneak, or block without sneak) -> OPEN BACKPACK GUI
+        // 5. All other right clicks -> OPEN BACKPACK GUI
         event.setCancelled(true);
-        service.openItem(player, event.getItem());
+        service.openItem(player, held);
+    }
+
+    @EventHandler
+    public void onSwapHand(PlayerSwapHandItemsEvent event) {
+        Player player = event.getPlayer();
+        if (player.isSneaking()) {
+            ItemStack backpack = service.getWornOrEquippedBackpack(player);
+            if (backpack != null && service.isBackpack(backpack)) {
+                event.setCancelled(true);
+                service.openItem(player, backpack);
+            }
+        }
     }
 
     @EventHandler public void onPlace(BlockPlaceEvent event) {
@@ -398,11 +468,48 @@ public final class BackpackListener implements Listener {
         }
         ItemStack currentItem = event.getCurrentItem();
 
+        // 0. ABSOLUTE PROTECTION: Never allow moving or taking empty module socket placeholders
+        if (service.isEmptyModuleSocket(cursor)) {
+            player.setItemOnCursor(null);
+            event.getView().setCursor(null);
+            event.setCancelled(true);
+            return;
+        }
+        if (service.isEmptyModuleSocket(currentItem)) {
+            event.setCancelled(true);
+            Inventory topInv = event.getView().getTopInventory();
+            int rSlot = event.getRawSlot();
+            if (topInv.getHolder() instanceof BackpackHolder && rSlot >= 0 && rSlot == topInv.getSize() - 1) {
+                // If clicked on legitimate module slot, let module click handler below process it
+            } else {
+                // Otherwise purge the rogue placeholder immediately
+                if (event.getClickedInventory() != null) {
+                    event.setCurrentItem(null);
+                }
+                player.updateInventory();
+                return;
+            }
+        }
+        if (event.getHotbarButton() >= 0) {
+            ItemStack hotbarItem = player.getInventory().getItem(event.getHotbarButton());
+            if (service.isEmptyModuleSocket(hotbarItem)) {
+                player.getInventory().setItem(event.getHotbarButton(), null);
+                event.setCancelled(true);
+                return;
+            }
+        }
+
         boolean isChestSlot = isChestplateSlot(event);
 
         // 1. Direct click on chestplate slot with a backpack on cursor (Equip)
         if (isChestSlot && service.isBackpack(cursor)) {
             event.setCancelled(true);
+            if (service.hasEquippedBackpack(player)) {
+                player.sendMessage(Component.text("§c❌ Bạn đã đang đeo một chiếc ba lô sau lưng rồi!"));
+                player.sendMessage(Component.text("§7Hãy gõ lệnh §f/bp unequip §7để tháo ba lô hiện tại trước khi đeo cái mới."));
+                player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                return;
+            }
             ItemStack toEquip = cursor.clone();
             toEquip.setAmount(1);
             ItemStack currentChest = player.getInventory().getChestplate();
@@ -452,9 +559,15 @@ public final class BackpackListener implements Listener {
         }
 
         // 3. Shift-click a backpack in player inventory when chestplate is empty
-        if (event.isShiftClick() && service.isBackpack(currentItem) && player.getInventory().getChestplate() == null) {
+        if (event.isShiftClick() && service.isBackpack(currentItem) && (player.getInventory().getChestplate() == null || player.getInventory().getChestplate().getType().isAir())) {
             if (event.getClickedInventory() == player.getInventory() || event.getView().getTopInventory().getHolder() == null || event.getView().getTopInventory().getType() == InventoryType.CRAFTING || event.getView().getTopInventory().getType() == InventoryType.CREATIVE) {
                 event.setCancelled(true);
+                if (service.hasEquippedBackpack(player)) {
+                    player.sendMessage(Component.text("§c❌ Bạn đã đang đeo một chiếc ba lô sau lưng rồi!"));
+                    player.sendMessage(Component.text("§7Hãy gõ lệnh §f/bp unequip §7để tháo ba lô hiện tại trước khi đeo cái mới."));
+                    player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                    return;
+                }
                 ItemStack equip = currentItem.clone();
                 equip.setAmount(1);
                 player.getInventory().setChestplate(equip);
@@ -471,6 +584,33 @@ public final class BackpackListener implements Listener {
                     player.updateInventory();
                 });
                 return;
+            }
+        }
+
+        // 4. Hotbar number key swap or offhand swap into chestplate slot with a backpack
+        if (isChestSlot) {
+            if (event.getClick() == ClickType.NUMBER_KEY && event.getHotbarButton() >= 0) {
+                ItemStack hotbarItem = player.getInventory().getItem(event.getHotbarButton());
+                if (service.isBackpack(hotbarItem)) {
+                    if (service.hasEquippedBackpack(player)) {
+                        event.setCancelled(true);
+                        player.sendMessage(Component.text("§c❌ Bạn đã đang đeo một chiếc ba lô sau lưng rồi!"));
+                        player.sendMessage(Component.text("§7Hãy gõ lệnh §f/bp unequip §7để tháo ba lô hiện tại trước khi đeo cái mới."));
+                        player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                        return;
+                    }
+                }
+            } else if (event.getClick() == ClickType.SWAP_OFFHAND) {
+                ItemStack offhand = player.getInventory().getItemInOffHand();
+                if (service.isBackpack(offhand)) {
+                    if (service.hasEquippedBackpack(player)) {
+                        event.setCancelled(true);
+                        player.sendMessage(Component.text("§c❌ Bạn đã đang đeo một chiếc ba lô sau lưng rồi!"));
+                        player.sendMessage(Component.text("§7Hãy gõ lệnh §f/bp unequip §7để tháo ba lô hiện tại trước khi đeo cái mới."));
+                        player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                        return;
+                    }
+                }
             }
         }
 
@@ -525,8 +665,8 @@ public final class BackpackListener implements Listener {
         int raw = event.getRawSlot();
         boolean isTop = raw >= 0 && raw < top.getSize();
 
-        // Handle Module Sockets (Slots in MODULE_SLOTS: 47, 48, 49, 50, 51)
-        if (isTop && service.isModuleSlot(raw)) {
+        // Handle Module Socket
+        if (isTop && service.isModuleSlot(top, raw)) {
             event.setCancelled(true);
             ItemStack currentModule = top.getItem(raw);
             boolean isCurModule = service.isModule(currentModule);
@@ -569,7 +709,8 @@ public final class BackpackListener implements Listener {
                 player.setItemOnCursor(taken);
 
                 int newCap = service.getMaxStackCapacity(top);
-                for (int slot : BackpackService.STORAGE_SLOTS) {
+                int[] storageSlots = top.getHolder() instanceof BackpackHolder h ? h.storageSlots() : service.getTierFromInventory(top).getStorageSlots();
+                for (int slot : storageSlots) {
                     ItemStack item = top.getItem(slot);
                     if (item != null && !item.getType().isAir()) {
                         if (item.getAmount() > newCap) {
@@ -598,7 +739,7 @@ public final class BackpackListener implements Listener {
         }
 
         // Prevent clicking/interacting with other non-storage decorative slots
-        if (isTop && !isStorage(raw)) {
+        if (isTop && !isStorage(top, raw)) {
             event.setCancelled(true);
             return;
         }
@@ -633,7 +774,7 @@ public final class BackpackListener implements Listener {
         }
 
         // Custom Deep-Stack Storage Slot Click Handlers
-        if (isTop && isStorage(raw)) {
+        if (isTop && isStorage(top, raw)) {
             ItemStack existing = top.getItem(raw);
             boolean cursorHasItem = cursor != null && !cursor.getType().isAir();
             boolean slotHasItem = existing != null && !existing.getType().isAir();
@@ -658,11 +799,11 @@ public final class BackpackListener implements Listener {
                     player.getInventory().setItem(hotbarSlot, toHotbar);
 
                     if (existing.getAmount() - take <= 0) {
-                        top.setItem(raw, null);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, null);
                     } else {
                         existing.setAmount(existing.getAmount() - take);
                         service.applyCustomStackSize(existing, maxCap);
-                        top.setItem(raw, existing);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                     }
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                     syncBackpackSlot(player, top, raw);
@@ -670,7 +811,7 @@ public final class BackpackListener implements Listener {
                 } else if (hotbarHas && !slotHasItem) {
                     ItemStack toStorage = hotbarItem.clone();
                     service.applyCustomStackSize(toStorage, maxCap);
-                    top.setItem(raw, toStorage);
+                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, toStorage);
                     player.getInventory().setItem(hotbarSlot, null);
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                     syncBackpackSlot(player, top, raw);
@@ -682,7 +823,7 @@ public final class BackpackListener implements Listener {
                             int move = Math.min(space, hotbarItem.getAmount());
                             existing.setAmount(existing.getAmount() + move);
                             service.applyCustomStackSize(existing, maxCap);
-                            top.setItem(raw, existing);
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                             if (hotbarItem.getAmount() - move <= 0) {
                                 player.getInventory().setItem(hotbarSlot, null);
                             } else {
@@ -702,7 +843,7 @@ public final class BackpackListener implements Listener {
                             ItemStack newStorage = hotbarItem.clone();
                             service.applyCustomStackSize(newStorage, maxCap);
                             player.getInventory().setItem(hotbarSlot, newHotbar);
-                            top.setItem(raw, newStorage);
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, newStorage);
                             player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                             syncBackpackSlot(player, top, raw);
                             return;
@@ -724,11 +865,11 @@ public final class BackpackListener implements Listener {
                     service.cleanCustomStackSize(dropped);
 
                     if (existing.getAmount() - dropAmount <= 0) {
-                        top.setItem(raw, null);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, null);
                     } else {
                         existing.setAmount(existing.getAmount() - dropAmount);
                         service.applyCustomStackSize(existing, maxCap);
-                        top.setItem(raw, existing);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                     }
                     org.bukkit.entity.Item entity = player.getWorld().dropItemNaturally(player.getEyeLocation(), dropped);
                     entity.setVelocity(player.getLocation().getDirection().multiply(0.3));
@@ -745,21 +886,25 @@ public final class BackpackListener implements Listener {
                     if (vanillaMax <= 0) vanillaMax = 64;
                     if (cursor.getAmount() < vanillaMax) {
                         int needed = vanillaMax - cursor.getAmount();
-                        for (int slot : BackpackService.STORAGE_SLOTS) {
+                        int[] dynamicSlots = top.getHolder() instanceof BackpackHolder h ? h.storageSlots() : service.getTierFromInventory(top).getStorageSlots();
+                        for (int slot : dynamicSlots) {
                             ItemStack item = top.getItem(slot);
                             if (item != null && !item.getType().isAir() && service.isSimilarIgnoringCustomStack(item, cursor)) {
                                 int take = Math.min(needed, item.getAmount());
-                                if (item.getAmount() - take <= 0) {
-                                    top.setItem(slot, null);
-                                } else {
-                                    item.setAmount(item.getAmount() - take);
-                                    top.setItem(slot, item);
-                                }
                                 cursor.setAmount(cursor.getAmount() + take);
                                 needed -= take;
+                                if (item.getAmount() - take <= 0) {
+                                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, slot, null);
+                                } else {
+                                    item.setAmount(item.getAmount() - take);
+                                    service.applyCustomStackSize(item, maxCap);
+                                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, slot, item);
+                                }
+                                syncBackpackSlot(player, top, slot);
                                 if (needed <= 0) break;
                             }
                         }
+                        service.cleanCustomStackSize(cursor);
                         player.setItemOnCursor(cursor);
                         player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                         player.updateInventory();
@@ -781,12 +926,12 @@ public final class BackpackListener implements Listener {
                         service.cleanCustomStackSize(pick);
                         existing.setAmount(existing.getAmount() - vanillaMax);
                         service.applyCustomStackSize(existing, maxCap);
-                        top.setItem(raw, existing);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                         player.setItemOnCursor(pick);
                     } else {
                         ItemStack pick = existing.clone();
                         service.cleanCustomStackSize(pick);
-                        top.setItem(raw, null);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, null);
                         player.setItemOnCursor(pick);
                     }
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
@@ -801,9 +946,9 @@ public final class BackpackListener implements Listener {
                     if (existing.getAmount() - half > 0) {
                         existing.setAmount(existing.getAmount() - half);
                         service.applyCustomStackSize(existing, maxCap);
-                        top.setItem(raw, existing);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                     } else {
-                        top.setItem(raw, null);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, null);
                     }
                     player.setItemOnCursor(pick);
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
@@ -816,7 +961,7 @@ public final class BackpackListener implements Listener {
                     event.setCancelled(true);
                     ItemStack toPlace = cursor.clone();
                     service.applyCustomStackSize(toPlace, maxCap);
-                    top.setItem(raw, toPlace);
+                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, toPlace);
                     player.setItemOnCursor(null);
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                     syncBackpackSlot(player, top, raw);
@@ -826,7 +971,7 @@ public final class BackpackListener implements Listener {
                     ItemStack place = cursor.clone();
                     place.setAmount(1);
                     service.applyCustomStackSize(place, maxCap);
-                    top.setItem(raw, place);
+                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, place);
                     if (cursor.getAmount() > 1) {
                         cursor.setAmount(cursor.getAmount() - 1);
                         player.setItemOnCursor(cursor);
@@ -847,7 +992,7 @@ public final class BackpackListener implements Listener {
                             int toMove = Math.min(space, cursor.getAmount());
                             existing.setAmount(existing.getAmount() + toMove);
                             service.applyCustomStackSize(existing, maxCap);
-                            top.setItem(raw, existing);
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                             if (cursor.getAmount() > toMove) {
                                 cursor.setAmount(cursor.getAmount() - toMove);
                                 player.setItemOnCursor(cursor);
@@ -863,7 +1008,7 @@ public final class BackpackListener implements Listener {
                         if (existing.getAmount() < maxCap && cursor.getAmount() >= 1) {
                             existing.setAmount(existing.getAmount() + 1);
                             service.applyCustomStackSize(existing, maxCap);
-                            top.setItem(raw, existing);
+                            vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, existing);
                             if (cursor.getAmount() > 1) {
                                 cursor.setAmount(cursor.getAmount() - 1);
                                 player.setItemOnCursor(cursor);
@@ -882,7 +1027,7 @@ public final class BackpackListener implements Listener {
                     service.cleanCustomStackSize(temp);
                     ItemStack toPlace = cursor.clone();
                     service.applyCustomStackSize(toPlace, maxCap);
-                    top.setItem(raw, toPlace);
+                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, toPlace);
                     player.setItemOnCursor(temp);
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                     syncBackpackSlot(player, top, raw);
@@ -896,9 +1041,11 @@ public final class BackpackListener implements Listener {
             event.setCancelled(true);
             if (current == null || current.getType().isAir()) return;
 
+            int[] dynamicSlots = top.getHolder() instanceof BackpackHolder h ? h.storageSlots() : service.getTierFromInventory(top).getStorageSlots();
+
             if (isTop) {
                 // Shift-click FROM Backpack TO Player Inventory: take 1 stack (up to 64) per shift-click
-                if (!isStorage(raw)) return;
+                if (!isStorage(top, raw)) return;
                 int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(current.getType());
                 if (vanillaMax <= 0) vanillaMax = 64;
 
@@ -913,11 +1060,11 @@ public final class BackpackListener implements Listener {
 
                 if (transferred > 0) {
                     if (current.getAmount() - transferred <= 0) {
-                        top.setItem(raw, null);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, null);
                     } else {
                         current.setAmount(current.getAmount() - transferred);
                         service.applyCustomStackSize(current, maxCap);
-                        top.setItem(raw, current);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, raw, current);
                     }
                     player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
                     syncBackpackSlot(player, top, raw);
@@ -930,7 +1077,7 @@ public final class BackpackListener implements Listener {
                 ItemStack toMove = current.clone();
 
                 // Pass 1: Try stacking into existing similar stacks
-                for (int slot : BackpackService.STORAGE_SLOTS) {
+                for (int slot : dynamicSlots) {
                     ItemStack existing = top.getItem(slot);
                     if (existing != null && !existing.getType().isAir() && service.isSimilarIgnoringCustomStack(existing, toMove) && existing.getAmount() < maxCap) {
                         int space = maxCap - existing.getAmount();
@@ -938,7 +1085,7 @@ public final class BackpackListener implements Listener {
                         ItemStack updated = existing.clone();
                         updated.setAmount(existing.getAmount() + move);
                         service.applyCustomStackSize(updated, maxCap);
-                        top.setItem(slot, updated);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, slot, updated);
                         syncBackpackSlot(player, top, slot);
                         toMove.setAmount(toMove.getAmount() - move);
                         if (toMove.getAmount() <= 0) {
@@ -951,12 +1098,12 @@ public final class BackpackListener implements Listener {
                 }
 
                 // Pass 2: Place remaining into empty slots
-                for (int slot : BackpackService.STORAGE_SLOTS) {
+                for (int slot : dynamicSlots) {
                     ItemStack existing = top.getItem(slot);
                     if (existing == null || existing.getType().isAir()) {
                         ItemStack placed = toMove.clone();
                         service.applyCustomStackSize(placed, maxCap);
-                        top.setItem(slot, placed);
+                        vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(top, slot, placed);
                         syncBackpackSlot(player, top, slot);
                         event.setCurrentItem(null);
                         player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1.0f);
@@ -1029,6 +1176,20 @@ public final class BackpackListener implements Listener {
     @EventHandler public void onDrag(InventoryDragEvent event) {
         if (event.getWhoClicked() instanceof Player player) {
             plugin.getServer().getScheduler().runTask(plugin, () -> service.updateWornBackpack(player));
+            if (service.isBackpack(event.getOldCursor()) && service.hasEquippedBackpack(player)) {
+                if (event.getRawSlots().contains(6) || (event.getInventory().getType() == InventoryType.PLAYER && event.getInventorySlots().contains(38))) {
+                    event.setCancelled(true);
+                    player.sendMessage(Component.text("§c❌ Bạn đã đang đeo một chiếc ba lô sau lưng rồi!"));
+                    player.sendMessage(Component.text("§7Hãy gõ lệnh §f/bp unequip §7để tháo ba lô hiện tại trước khi đeo cái mới."));
+                    player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1.0f, 1.0f);
+                    return;
+                }
+            }
+        }
+
+        if (service.isEmptyModuleSocket(event.getOldCursor()) || event.getNewItems().values().stream().anyMatch(service::isEmptyModuleSocket)) {
+            event.setCancelled(true);
+            return;
         }
 
         Inventory top = event.getView().getTopInventory();
@@ -1044,7 +1205,7 @@ public final class BackpackListener implements Listener {
         }
 
         if (isTopBackpack) {
-            if (event.getRawSlots().stream().anyMatch(slot -> slot < top.getSize() && !isStorage(slot))) {
+            if (event.getRawSlots().stream().anyMatch(slot -> slot < top.getSize() && !isStorage(top, slot))) {
                 event.setCancelled(true);
             }
             if (!event.isCancelled() && (service.isBlocked(event.getOldCursor()) || (service.isBackpack(event.getOldCursor()) && !service.allowBackpacksInsideBackpacks()))) {
@@ -1093,11 +1254,13 @@ public final class BackpackListener implements Listener {
                 if (leftover != null) moved.setAmount(event.getItem().getAmount() - leftover.getAmount());
                 event.getSource().removeItem(moved);
             }
-        } else if (sourceBackpack && !destinationBackpack) {
-            ItemStack moved = service.removeFromPlacedBackpack(event.getSource(), event.getItem());
-            if (moved != null) {
-                Map<Integer, ItemStack> leftovers = event.getDestination().addItem(moved);
-                for (ItemStack leftover : leftovers.values()) service.addToPlacedBackpack(event.getSource(), leftover);
+        } else {
+            ItemStack removed = service.removeFromPlacedBackpack(event.getSource(), event.getItem());
+            if (removed != null && removed.getAmount() > 0) {
+                Map<Integer, ItemStack> leftover = event.getDestination().addItem(removed);
+                if (!leftover.isEmpty()) {
+                    service.addToPlacedBackpack(event.getSource(), leftover.values().iterator().next());
+                }
             }
         }
     }
@@ -1119,9 +1282,13 @@ public final class BackpackListener implements Listener {
     public static void sanitizePlayerInventory(Player player) {
         if (player == null) return;
         PlayerInventory inv = player.getInventory();
-        for (int i = 0; i < 36; i++) {
+        for (int i = 0; i < inv.getSize(); i++) {
             ItemStack item = inv.getItem(i);
             if (item != null && !item.getType().isAir()) {
+                if (isPlaceholderItem(item)) {
+                    inv.setItem(i, null);
+                    continue;
+                }
                 int vanillaMax = vn.haohan.backpack.hook.NmsStackHelper.getVanillaMaxStackSize(item.getType());
                 if (vanillaMax > 0 && item.getAmount() > vanillaMax) {
                     int excess = item.getAmount() - vanillaMax;
@@ -1137,8 +1304,31 @@ public final class BackpackListener implements Listener {
                 }
             }
         }
+        if (isPlaceholderItem(player.getItemOnCursor())) {
+            player.setItemOnCursor(null);
+        }
     }
+
+    private static boolean isPlaceholderItem(ItemStack item) {
+        if (item == null || item.getType().isAir()) return false;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return false;
+        if (meta.hasItemModel() && meta.getItemModel().toString().contains("empty_module_slot")) return true;
+        if (meta.hasDisplayName()) {
+            String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                    .serialize(meta.displayName());
+            if (name.contains("Ô Cắm Module") || name.contains("Empty Module Slot")) return true;
+        }
+        return false;
+    }
+
     @EventHandler public void onJoin(PlayerJoinEvent event) {
+        for (ItemStack item : event.getPlayer().getInventory().getContents()) {
+            if (item != null && service.isBackpack(item)) {
+                service.refreshBackpackItem(item);
+            }
+        }
+        sanitizePlayerInventory(event.getPlayer());
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
             service.updateWornBackpack(event.getPlayer());
             service.discoverRecipes(event.getPlayer());
@@ -1152,13 +1342,31 @@ public final class BackpackListener implements Listener {
         service.removeWornBackpack(event.getPlayer());
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> service.updateWornBackpack(event.getPlayer()), 5L);
     }
-    private boolean isStorage(int slot) { for (int value : BackpackService.STORAGE_SLOTS) if (value == slot) return true; return false; }
+    private boolean isStorage(Inventory top, int slot) {
+        if (top != null && top.getHolder() instanceof BackpackHolder h) {
+            for (int value : h.storageSlots()) if (value == slot) return true;
+            return false;
+        }
+        if (top != null) {
+            for (int value : service.getTierFromInventory(top).getStorageSlots()) if (value == slot) return true;
+        }
+        return false;
+    }
 
     @EventHandler public void onPickup(EntityPickupItemEvent event) {
         if (!(event.getEntity() instanceof Player player)) return;
         ItemStack item = event.getItem().getItemStack();
+        if (isPlaceholderItem(item)) {
+            event.setCancelled(true);
+            event.getItem().remove();
+            return;
+        }
         if (service.isBackpack(item)) {
-            if (!service.canReceiveBackpacks(player, item.getAmount())) event.setCancelled(true);
+            if (!service.canReceiveBackpacks(player, item.getAmount())) {
+                event.setCancelled(true);
+            } else {
+                service.refreshBackpackItem(item);
+            }
             return;
         }
 
@@ -1205,10 +1413,24 @@ public final class BackpackListener implements Listener {
 
     @EventHandler public void onDeath(PlayerDeathEvent event) {
         service.removeWornBackpack(event.getEntity());
+        Player player = event.getEntity();
+        ItemStack equipped = service.getEquippedBackpack(player);
+        if (equipped != null && service.isBackpack(equipped)) {
+            if (!service.keepBackpacksAfterDeath()) {
+                event.getDrops().add(equipped);
+                service.setEquippedBackpack(player, null);
+            }
+        }
         if (!service.keepBackpacksAfterDeath()) return;
         var backpacks = event.getDrops().stream().filter(service::isBackpack).toList();
         event.getDrops().removeIf(service::isBackpack);
         event.getItemsToKeep().addAll(backpacks);
+    }
+
+    @EventHandler public void onRespawn(PlayerRespawnEvent event) {
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            service.updateWornBackpack(event.getPlayer());
+        }, 5L);
     }
 
     private static Map<Integer, ItemStack> addItemToPlayerInventoryReverse(org.bukkit.inventory.PlayerInventory inv, ItemStack item) {
@@ -1266,7 +1488,7 @@ public final class BackpackListener implements Listener {
     }
 
     public static void sendDirectSlotUpdate(Player player, int rawSlot, ItemStack item) {
-        if (player == null || !player.isOnline()) return;
+        if (player == null || !player.isOnline() || rawSlot < 0) return;
         try {
             Class<?> craftPlayerClass = Class.forName("org.bukkit.craftbukkit.entity.CraftPlayer");
             Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
@@ -1299,48 +1521,18 @@ public final class BackpackListener implements Listener {
         }
     }
 
-    public static void sendDirectCursorUpdate(Player player) {
-        if (player == null || !player.isOnline()) return;
-        try {
-            Class<?> craftPlayerClass = Class.forName("org.bukkit.craftbukkit.entity.CraftPlayer");
-            Class<?> craftItemStackClass = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
-            Object craftPlayer = craftPlayerClass.cast(player);
-            Method getHandle = craftPlayerClass.getMethod("getHandle");
-            Object serverPlayer = getHandle.invoke(craftPlayer);
-
-            Field containerMenuField = serverPlayer.getClass().getField("containerMenu");
-            Object containerMenu = containerMenuField.get(serverPlayer);
-
-            Method getStateId = containerMenu.getClass().getMethod("getStateId");
-            int stateId = (int) getStateId.invoke(containerMenu);
-
-            ItemStack cursor = player.getItemOnCursor();
-            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
-            Object nmsItem = asNMSCopy.invoke(null, cursor == null ? new ItemStack(Material.AIR) : cursor);
-
-            Class<?> setSlotPacketClass = Class.forName("net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket");
-            Object packet = setSlotPacketClass.getConstructor(int.class, int.class, int.class, Class.forName("net.minecraft.world.item.ItemStack"))
-                    .newInstance(-1, stateId, -1, nmsItem);
-
-            Field connectionField = serverPlayer.getClass().getField("connection");
-            Object connection = connectionField.get(serverPlayer);
-            Method sendMethod = connection.getClass().getMethod("send", Class.forName("net.minecraft.network.protocol.Packet"));
-            sendMethod.invoke(connection, packet);
-        } catch (Throwable ignored) {
-            player.updateInventory();
-        }
-    }
-
     private void syncBackpackSlot(Player player, Inventory top, int raw) {
-        ItemStack item = top.getItem(raw);
-        sendDirectSlotUpdate(player, raw, item);
-        sendDirectCursorUpdate(player);
+        if (raw >= 0 && top != null && raw < top.getSize()) {
+            ItemStack item = top.getItem(raw);
+            sendDirectSlotUpdate(player, raw, item);
+        }
         player.updateInventory();
         plugin.getServer().getScheduler().runTask(plugin, () -> {
             if (player.isOnline() && player.getOpenInventory().getTopInventory().equals(top)) {
-                ItemStack cur = top.getItem(raw);
-                sendDirectSlotUpdate(player, raw, cur);
-                sendDirectCursorUpdate(player);
+                if (raw >= 0 && top != null && raw < top.getSize()) {
+                    ItemStack cur = top.getItem(raw);
+                    sendDirectSlotUpdate(player, raw, cur);
+                }
                 player.updateInventory();
             }
         });

@@ -17,6 +17,7 @@ import java.util.UUID;
 public final class BackpackCommand implements BasicCommand {
     private static final String PREFIX = "§8[§bHaoHanBackpack§8] ";
     private static final List<CommandInfo> COMMANDS = List.of(
+            new CommandInfo("unequip", null, "/hhbp unequip (tháo ba lô đeo sau lưng)"),
             new CommandInfo("give", "haohanbackpack.give", "/hhbp give <người chơi> <số lượng>"),
             new CommandInfo("list", null, "/hhbp list"),
             new CommandInfo("info", "haohanbackpack.admin", "/hhbp info <người chơi>"),
@@ -29,17 +30,57 @@ public final class BackpackCommand implements BasicCommand {
 
     @Override public void execute(CommandSourceStack source, String[] args) {
         CommandSender sender = source.getSender();
-        if (args.length == 0 || args[0].equalsIgnoreCase("help")) { sendHelp(sender); return; }
+        if (args.length == 0) {
+            if (sender instanceof Player player) {
+                ItemStack backpack = service.getWornOrEquippedBackpack(player);
+                if (backpack != null && service.isBackpack(backpack)) {
+                    service.openItem(player, backpack);
+                    return;
+                }
+            }
+            sendHelp(sender);
+            return;
+        }
+        if (args[0].equalsIgnoreCase("help")) { sendHelp(sender); return; }
+        if (args[0].equalsIgnoreCase("unequip") || args[0].equalsIgnoreCase("thao") || args[0].equalsIgnoreCase("takeoff")) {
+            if (!(sender instanceof Player player)) { sender.sendMessage(PREFIX + "§cLệnh này chỉ dành cho người chơi."); return; }
+            ItemStack equipped = service.unequipBackpack(player);
+            if (equipped == null) {
+                player.sendMessage(PREFIX + "§cBạn hiện không đeo ba lô nào ở ô phụ kiện.");
+                return;
+            }
+            for (ItemStack leftover : player.getInventory().addItem(equipped).values()) {
+                player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+            }
+            player.sendMessage(PREFIX + "§a✔ Đã tháo ba lô khỏi lưng và trả về túi đồ!");
+            player.playSound(player.getLocation(), org.bukkit.Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
+            return;
+        }
         CommandInfo command = findCommand(args[0]);
         if (command == null) { sender.sendMessage(PREFIX + "§cLệnh không hợp lệ. Dùng §f/hhbp help§c để xem hướng dẫn."); return; }
         if (!hasPermission(sender, command.permission())) { sender.sendMessage(PREFIX + "§cBạn không có quyền."); return; }
         switch (command.name()) {
+            case "unequip" -> unequip(sender);
             case "give" -> give(sender, args);
             case "list" -> list(sender, args);
             case "info" -> info(sender, args);
             case "delete" -> delete(sender, args);
             case "reload" -> reload(sender, args);
         }
+    }
+
+    private void unequip(CommandSender sender) {
+        if (!(sender instanceof Player player)) { sender.sendMessage(PREFIX + "§cLệnh này chỉ dành cho người chơi."); return; }
+        ItemStack equipped = service.unequipBackpack(player);
+        if (equipped == null) {
+            player.sendMessage(PREFIX + "§cBạn hiện không đeo ba lô nào ở ô phụ kiện.");
+            return;
+        }
+        for (ItemStack leftover : player.getInventory().addItem(equipped).values()) {
+            player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+        }
+        player.sendMessage(PREFIX + "§a✔ Đã tháo ba lô khỏi lưng và trả về túi đồ!");
+        player.playSound(player.getLocation(), org.bukkit.Sound.ITEM_ARMOR_EQUIP_LEATHER, 1.0f, 1.0f);
     }
 
     private void give(CommandSender sender, String[] args) {

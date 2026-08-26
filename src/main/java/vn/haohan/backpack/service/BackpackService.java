@@ -12,6 +12,7 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.Interaction;
 import org.bukkit.util.Transformation;
@@ -32,6 +33,7 @@ import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
 import vn.haohan.backpack.gui.BackpackHolder;
 import vn.haohan.backpack.storage.SqliteStore;
+import vn.haohan.backpack.tier.BackpackTier;
 
 import java.io.File;
 import java.io.DataInputStream;
@@ -44,17 +46,27 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public final class BackpackService {
-    /**
-     * The reserved sockets (5 module slots) are deliberately outside persisted
-     * backpack storage.
-     */
     public static final int[] MODULE_SLOTS = { 47, 48, 49, 50, 51 };
-    /**
-     * All usable storage slots in the six-row backpack (54 - module sockets = 49
-     * storage slots).
-     */
     public static final int[] STORAGE_SLOTS = java.util.stream.IntStream.range(0, 54)
-            .filter(slot -> !containsStatic(MODULE_SLOTS, slot)).toArray();
+            .filter(slot -> java.util.Arrays.stream(MODULE_SLOTS).noneMatch(m -> m == slot)).toArray();
+
+    private static boolean containsStatic(int[] a, int value) {
+        if (a == null)
+            return false;
+        for (int slot : a)
+            if (slot == value)
+                return true;
+        return false;
+    }
+
+    private static float getPlayerBodyYaw(Player player) {
+        try {
+            return player.getBodyYaw();
+        } catch (Throwable ignored) {
+            return player.getLocation().getYaw();
+        }
+    }
+
     private final Plugin plugin;
     private final NamespacedKey itemKey;
     private final NamespacedKey backpackIdKey;
@@ -64,7 +76,10 @@ public final class BackpackService {
     private final NamespacedKey visualKey;
     private final NamespacedKey visualIdKey;
     private final NamespacedKey wornKey;
+    private final NamespacedKey equippedKey;
     private final NamespacedKey colorKey;
+    private final NamespacedKey origNameKey;
+    private final NamespacedKey tierKey;
     private final Map<UUID, Inventory> open = new HashMap<>();
     private final File dataFolder;
     private final SqliteStore database;
@@ -79,7 +94,10 @@ public final class BackpackService {
         this.visualKey = new NamespacedKey(plugin, "backpack_visual");
         this.visualIdKey = new NamespacedKey(plugin, "backpack_visual_id");
         this.wornKey = new NamespacedKey(plugin, "worn_backpack");
+        this.equippedKey = new NamespacedKey(plugin, "equipped_backpack");
         this.colorKey = new NamespacedKey(plugin, "backpack_color");
+        this.origNameKey = new NamespacedKey(plugin, "orig_display_name");
+        this.tierKey = new NamespacedKey(plugin, "backpack_tier");
         this.dataFolder = new File(plugin.getDataFolder(), "backpacks");
         dataFolder.mkdirs();
         SqliteStore store;
@@ -90,6 +108,61 @@ public final class BackpackService {
             store = null;
         }
         this.database = store;
+    }
+
+    public NamespacedKey equippedKey() {
+        return equippedKey;
+    }
+
+    public ItemStack getEquippedBackpack(Player player) {
+        if (player == null || !player.isOnline())
+            return null;
+        if (!player.getPersistentDataContainer().has(equippedKey, PersistentDataType.BYTE_ARRAY))
+            return null;
+        byte[] bytes = player.getPersistentDataContainer().get(equippedKey, PersistentDataType.BYTE_ARRAY);
+        if (bytes == null || bytes.length == 0)
+            return null;
+        try {
+            return ItemStack.deserializeBytes(bytes);
+        } catch (Throwable ex) {
+            return null;
+        }
+    }
+
+    public void setEquippedBackpack(Player player, ItemStack item) {
+        if (player == null || !player.isOnline())
+            return;
+        if (item == null || item.getType().isAir()) {
+            player.getPersistentDataContainer().remove(equippedKey);
+        } else {
+            byte[] bytes = item.serializeAsBytes();
+            player.getPersistentDataContainer().set(equippedKey, PersistentDataType.BYTE_ARRAY, bytes);
+        }
+    }
+
+    public boolean hasEquippedBackpack(Player player) {
+        return getEquippedBackpack(player) != null;
+    }
+
+    public ItemStack unequipBackpack(Player player) {
+        ItemStack current = getEquippedBackpack(player);
+        if (current != null) {
+            player.getPersistentDataContainer().remove(equippedKey);
+            removeWornBackpack(player);
+        }
+        return current;
+    }
+
+    public ItemStack getWornOrEquippedBackpack(Player player) {
+        if (player == null || !player.isOnline())
+            return null;
+        ItemStack equipped = getEquippedBackpack(player);
+        if (equipped != null && isBackpack(equipped))
+            return equipped;
+        ItemStack chest = player.getInventory().getChestplate();
+        if (chest != null && isBackpack(chest))
+            return chest;
+        return null;
     }
 
     public void registerItemCoreDefinition() {
@@ -185,18 +258,118 @@ public final class BackpackService {
         return item;
     }
 
+    public BackpackTier getBackpackTier(ItemMeta meta) {
+        if (meta == null)
+            return BackpackTier.LEATHER;
+        if (meta.getPersistentDataContainer().has(tierKey, PersistentDataType.STRING)) {
+            String id = meta.getPersistentDataContainer().get(tierKey, PersistentDataType.STRING);
+            return BackpackTier.fromId(id);
+        }
+
+        // Detect from ItemModel if present
+        if (meta.hasItemModel()) {
+            String model = meta.getItemModel().toString().toLowerCase();
+            for (BackpackTier tier : BackpackTier.values()) {
+                if (model.contains("backpack_" + tier.getId())) {
+                    meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, tier.getId());
+                    return tier;
+                }
+            }
+            if (model.contains("backpack")) {
+                meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING,
+                        BackpackTier.NETHERITE.getId());
+                return BackpackTier.NETHERITE;
+            }
+        }
+
+        // Detect from Display Name if present
+        if (meta.hasDisplayName()) {
+            String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                    .serialize(meta.displayName()).toLowerCase();
+            if (name.contains("netherite")) {
+                meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING,
+                        BackpackTier.NETHERITE.getId());
+                return BackpackTier.NETHERITE;
+            }
+            if (name.contains("kim cương") || name.contains("diamond")) {
+                meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, BackpackTier.DIAMOND.getId());
+                return BackpackTier.DIAMOND;
+            }
+            if (name.contains("vàng") || name.contains("gold")) {
+                meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, BackpackTier.GOLD.getId());
+                return BackpackTier.GOLD;
+            }
+            if (name.contains("sắt") || name.contains("iron")) {
+                meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, BackpackTier.IRON.getId());
+                return BackpackTier.IRON;
+            }
+            if (name.contains("da") || name.contains("leather")) {
+                meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, BackpackTier.LEATHER.getId());
+                return BackpackTier.LEATHER;
+            }
+        }
+
+        return BackpackTier.LEATHER;
+    }
+
+    public BackpackTier getBackpackTier(ItemStack item) {
+        if (item == null || item.getType().isAir())
+            return BackpackTier.LEATHER;
+        try {
+            String itemId = vn.haohan.itemcore.api.HaoHanItemCore.get().getItemService().getId(item);
+            if (itemId != null) {
+                for (BackpackTier tier : BackpackTier.values()) {
+                    if (itemId.contains("_" + tier.getId())) {
+                        if (item.hasItemMeta()) {
+                            ItemMeta meta = item.getItemMeta();
+                            meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, tier.getId());
+                            item.setItemMeta(meta);
+                        }
+                        return tier;
+                    }
+                }
+                if (itemId.equals("haohan:backpack")) {
+                    if (item.hasItemMeta()) {
+                        ItemMeta meta = item.getItemMeta();
+                        meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING,
+                                BackpackTier.NETHERITE.getId());
+                        item.setItemMeta(meta);
+                    }
+                    return BackpackTier.NETHERITE;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (item.hasItemMeta()) {
+            return getBackpackTier(item.getItemMeta());
+        }
+        return BackpackTier.LEATHER;
+    }
+
+    public void setBackpackTier(ItemStack item, BackpackTier tier) {
+        if (item == null || item.getType().isAir() || tier == null)
+            return;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null)
+            return;
+        meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, tier.getId());
+        applyBackpackMeta(meta);
+        updateBackpackLore(meta, null);
+        item.setItemMeta(meta);
+    }
+
     /**
      * Keep the item model and stack limit on the actual ItemStack. ItemCore's
      * definition is not enough for items created by an older definition, and
      * packs such as Hyper Punchy can otherwise fall back to the CHEST model.
      */
     private void applyBackpackMeta(ItemMeta meta) {
-        String modelName = "haohan:backpack";
+        BackpackTier tier = getBackpackTier(meta);
+        meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, tier.getId());
+        String modelName = "haohan:backpack_" + tier.getId();
         if (meta.getPersistentDataContainer().has(colorKey, PersistentDataType.INTEGER)) {
             int rgb = meta.getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
-            modelName = "haohan:backpack_" + getClosestDyeColorName(rgb);
-        } else {
-            modelName = plugin.getConfig().getString("backpack-item-model", "haohan:backpack");
+            modelName = "haohan:backpack_" + tier.getId() + "_" + getClosestDyeColorName(rgb);
         }
         meta.setItemModel(NamespacedKey.fromString(modelName));
         meta.setMaxStackSize(1);
@@ -215,7 +388,8 @@ public final class BackpackService {
         if (item == null || item.getType().isAir())
             return false;
         try {
-            if (vn.haohan.itemcore.api.HaoHanItemCore.get().getItemService().isItem(item, "haohan:backpack"))
+            String itemId = vn.haohan.itemcore.api.HaoHanItemCore.get().getItemService().getId(item);
+            if (itemId != null && (itemId.equals("haohan:backpack") || itemId.startsWith("haohan:backpack_")))
                 return true;
         } catch (Throwable ignored) {
         }
@@ -223,6 +397,26 @@ public final class BackpackService {
             return false;
         return item.getItemMeta().getPersistentDataContainer().has(itemKey, PersistentDataType.BYTE)
                 || item.getItemMeta().getPersistentDataContainer().has(backpackIdKey, PersistentDataType.STRING);
+    }
+
+    public void refreshBackpackItem(ItemStack item) {
+        if (item == null || item.getType().isAir() || !isBackpack(item))
+            return;
+        BackpackTier tier = getBackpackTier(item);
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null)
+            return;
+        meta.getPersistentDataContainer().set(tierKey, PersistentDataType.STRING, tier.getId());
+        updateBackpackLore(meta, null);
+        applyBackpackMeta(meta);
+        item.setItemMeta(meta);
+        if (meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY)) {
+            byte[] bytes = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
+            List<ItemStack> items = deserializeToItems(bytes);
+            if (!items.isEmpty()) {
+                applyContainerComponent(item, items);
+            }
+        }
     }
 
     public UUID backpackId(ItemStack item) {
@@ -363,6 +557,20 @@ public final class BackpackService {
         return open(player, storage, storageId, null, null, null);
     }
 
+    public BackpackTier getTierFromInventory(Inventory inventory) {
+        if (inventory == null)
+            return BackpackTier.NETHERITE;
+        if (inventory.getHolder() instanceof BackpackHolder holder && holder.sourceItem() != null) {
+            return getBackpackTier(holder.sourceItem());
+        }
+        int size = inventory.getSize();
+        for (BackpackTier tier : BackpackTier.values()) {
+            if (tier.getTotalSlots() == size)
+                return tier;
+        }
+        return BackpackTier.NETHERITE;
+    }
+
     private Inventory open(Player player, UUID storage, String storageId, ItemStack sourceItem, TileState sourceBlock,
             ItemDisplay sourceDisplay) {
         cleanupStaleLocks();
@@ -370,8 +578,11 @@ public final class BackpackService {
             player.sendMessage("§cBa lô này đang được mở bởi người khác.");
             return null;
         }
-        BackpackHolder holder = new BackpackHolder(storageId, STORAGE_SLOTS, sourceItem, sourceBlock, sourceDisplay);
-        Inventory inventory = plugin.getServer().createInventory(holder, 54, guiTitle(player));
+        BackpackTier tier = sourceItem != null ? getBackpackTier(sourceItem) : BackpackTier.NETHERITE;
+        int[] dynamicStorageSlots = tier.getStorageSlots();
+        BackpackHolder holder = new BackpackHolder(storageId, dynamicStorageSlots, sourceItem, sourceBlock,
+                sourceDisplay);
+        Inventory inventory = plugin.getServer().createInventory(holder, tier.getTotalSlots(), guiTitle(player, tier));
         inventory.setMaxStackSize(512);
         holder.inventory(inventory);
         if (sourceItem != null) {
@@ -386,19 +597,51 @@ public final class BackpackService {
         decorate(inventory);
         open.put(storage, inventory);
         player.openInventory(inventory);
+        plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (player.isOnline() && player.getOpenInventory().getTopInventory().equals(inventory)) {
+                for (int slot : dynamicStorageSlots) {
+                    ItemStack cur = inventory.getItem(slot);
+                    if (cur != null && !cur.getType().isAir()) {
+                        vn.haohan.backpack.listener.BackpackListener.sendDirectSlotUpdate(player, slot, cur);
+                    }
+                }
+            }
+        });
         player.playSound(player.getLocation(), "haohan:backpack.open", 1.0f, 1.0f);
         return inventory;
     }
 
-    private Component guiTitle(Player player) {
+    private Component guiTitle(Player player, BackpackTier tier) {
         String fallback = plugin.getConfig().getString("title", "&8Ba lô của %player%").replace("%player%",
                 player.getName());
         if (!plugin.getConfig().getBoolean("custom-gui.enabled", true))
             return component(fallback);
 
         String font = plugin.getConfig().getString("custom-gui.font", "haohan:gui");
-        String prefix = plugin.getConfig().getString("custom-gui.prefix", "\uE100");
-        String glyph = plugin.getConfig().getString("custom-gui.glyph", "\uE101");
+        String prefix = "\uE100";
+        if (plugin.getConfig().contains("custom-gui.prefix")) {
+            String cfgPrefix = plugin.getConfig().getString("custom-gui.prefix");
+            if (cfgPrefix != null && !cfgPrefix.isEmpty() && !cfgPrefix.contains("?") && !cfgPrefix.contains("")) {
+                prefix = cfgPrefix;
+            }
+        }
+
+        int rows = tier != null ? tier.getRows() : 6;
+        String glyph = switch (rows) {
+            case 1 -> "\uE102";
+            case 2 -> "\uE103";
+            case 3 -> "\uE104";
+            case 4 -> "\uE105";
+            case 5 -> "\uE106";
+            case 6 -> "\uE101";
+            default -> "\uE101";
+        };
+        if (plugin.getConfig().contains("custom-gui.glyphs." + rows)) {
+            String cfgGlyph = plugin.getConfig().getString("custom-gui.glyphs." + rows);
+            if (cfgGlyph != null && !cfgGlyph.isEmpty() && !cfgGlyph.contains("?") && !cfgGlyph.contains("")) {
+                glyph = cfgGlyph;
+            }
+        }
         net.kyori.adventure.key.Key fontKey = net.kyori.adventure.key.Key.key(font);
         return Component.text(prefix + glyph)
                 .font(fontKey)
@@ -409,16 +652,30 @@ public final class BackpackService {
      * The custom bitmap GUI supplies the background; module sockets are real locked
      * items.
      */
-    /**
-     * The custom bitmap GUI supplies the background; module sockets are real locked
-     * items.
-     */
     private void decorate(Inventory inventory) {
+        if (inventory == null)
+            return;
+        BackpackTier tier = getTierFromInventory(inventory);
+        int[] moduleSlots = tier.getModuleSlots();
+        int[] storageSlots = tier.getStorageSlots();
+
+        // Clean out any rogue empty module placeholders from storage slots
+        for (int slot : storageSlots) {
+            if (slot < inventory.getSize()) {
+                ItemStack item = inventory.getItem(slot);
+                if (item != null && isEmptyModuleSocket(item)) {
+                    inventory.setItem(slot, null);
+                }
+            }
+        }
+
         ItemStack socket = createModuleSocketItem();
-        for (int slot : MODULE_SLOTS) {
-            ItemStack current = inventory.getItem(slot);
-            if (current == null || current.getType().isAir()) {
-                inventory.setItem(slot, socket.clone());
+        for (int slot : moduleSlots) {
+            if (slot < inventory.getSize()) {
+                ItemStack current = inventory.getItem(slot);
+                if (current == null || current.getType().isAir()) {
+                    inventory.setItem(slot, socket.clone());
+                }
             }
         }
         applyCustomStackLimits(inventory);
@@ -443,11 +700,19 @@ public final class BackpackService {
         if (item == null || item.getType().isAir())
             return false;
         ItemMeta meta = item.getItemMeta();
-        if (meta == null || !meta.hasDisplayName())
+        if (meta == null)
             return false;
-        String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
-                .serialize(meta.displayName());
-        return name.contains("Ô Cắm Module") || name.contains("Empty Module Slot");
+        if (meta.hasItemModel() && meta.getItemModel().toString().contains("empty_module_slot")) {
+            return true;
+        }
+        if (meta.hasDisplayName()) {
+            String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                    .serialize(meta.displayName());
+            if (name.contains("Ô Cắm Module") || name.contains("Empty Module Slot")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public boolean isModule(ItemStack item) {
@@ -491,12 +756,15 @@ public final class BackpackService {
         if (inventory == null)
             return 64;
         int highestCap = 64;
-        for (int slot : MODULE_SLOTS) {
-            ItemStack module = inventory.getItem(slot);
-            if (module != null && isModule(module)) {
-                int cap = getModuleStackCapacity(module);
-                if (cap > highestCap) {
-                    highestCap = cap; // Prioritize highest tier without stacking
+        BackpackTier tier = getTierFromInventory(inventory);
+        for (int slot : tier.getModuleSlots()) {
+            if (slot < inventory.getSize()) {
+                ItemStack module = inventory.getItem(slot);
+                if (module != null && isModule(module)) {
+                    int cap = getModuleStackCapacity(module);
+                    if (cap > highestCap) {
+                        highestCap = cap;
+                    }
                 }
             }
         }
@@ -504,35 +772,91 @@ public final class BackpackService {
     }
 
     public void applyCustomStackSize(ItemStack item, int maxCap) {
-        if (item == null || item.getType().isAir()) return;
+        if (item == null || item.getType().isAir())
+            return;
         ItemMeta meta = item.getItemMeta();
-        if (meta == null) return;
+        if (meta == null)
+            return;
+
         if (maxCap > 64) {
             try {
                 meta.setMaxStackSize(99);
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {
+            }
         } else {
-            if (meta.hasMaxStackSize()) meta.setMaxStackSize(null);
+            if (meta.hasMaxStackSize())
+                meta.setMaxStackSize(null);
         }
+
+        if (item.getAmount() > 64) {
+            String baseName;
+            if (meta.getPersistentDataContainer().has(origNameKey, PersistentDataType.STRING)) {
+                baseName = meta.getPersistentDataContainer().get(origNameKey, PersistentDataType.STRING);
+            } else {
+                if (meta.hasDisplayName()) {
+                    baseName = meta.getDisplayName();
+                } else {
+                    baseName = formatItemStackName(item);
+                }
+                meta.getPersistentDataContainer().set(origNameKey, PersistentDataType.STRING, baseName);
+            }
+            meta.setDisplayName(baseName + " §e(x" + item.getAmount() + ")");
+        } else {
+            if (meta.getPersistentDataContainer().has(origNameKey, PersistentDataType.STRING)) {
+                String orig = meta.getPersistentDataContainer().get(origNameKey, PersistentDataType.STRING);
+                meta.getPersistentDataContainer().remove(origNameKey);
+                if (orig != null && !orig.equals(formatItemStackName(item))) {
+                    meta.setDisplayName(orig);
+                } else {
+                    meta.setDisplayName(null);
+                }
+            } else if (meta.hasDisplayName() && meta.getDisplayName().matches(".* §e\\(x\\d+\\)$")) {
+                String clean = meta.getDisplayName().replaceAll(" §e\\(x\\d+\\)$", "");
+                if (clean.equals(formatItemStackName(item))) {
+                    meta.setDisplayName(null);
+                } else {
+                    meta.setDisplayName(clean);
+                }
+            }
+        }
+
         item.setItemMeta(meta);
     }
 
     public void cleanCustomStackSize(ItemStack item) {
-        if (item == null || item.getType().isAir()) return;
+        if (item == null || item.getType().isAir())
+            return;
         if (item.hasItemMeta()) {
             ItemMeta meta = item.getItemMeta();
             if (meta != null) {
-                if (meta.hasMaxStackSize()) {
+                if (meta.hasMaxStackSize())
                     meta.setMaxStackSize(null);
-                    item.setItemMeta(meta);
+                if (meta.getPersistentDataContainer().has(origNameKey, PersistentDataType.STRING)) {
+                    String orig = meta.getPersistentDataContainer().get(origNameKey, PersistentDataType.STRING);
+                    meta.getPersistentDataContainer().remove(origNameKey);
+                    if (orig != null && !orig.equals(formatItemStackName(item))) {
+                        meta.setDisplayName(orig);
+                    } else {
+                        meta.setDisplayName(null);
+                    }
+                } else if (meta.hasDisplayName() && meta.getDisplayName().matches(".* §e\\(x\\d+\\)$")) {
+                    String clean = meta.getDisplayName().replaceAll(" §e\\(x\\d+\\)$", "");
+                    if (clean.equals(formatItemStackName(item))) {
+                        meta.setDisplayName(null);
+                    } else {
+                        meta.setDisplayName(clean);
+                    }
                 }
+                item.setItemMeta(meta);
             }
         }
     }
 
     public boolean isSimilarIgnoringCustomStack(ItemStack a, ItemStack b) {
-        if (a == null || b == null) return false;
-        if (a.getType() != b.getType()) return false;
+        if (a == null || b == null)
+            return false;
+        if (a.getType() != b.getType())
+            return false;
         ItemStack aClone = a.clone();
         cleanCustomStackSize(aClone);
         ItemStack bClone = b.clone();
@@ -541,13 +865,17 @@ public final class BackpackService {
     }
 
     public void applyCustomStackLimits(Inventory inventory) {
-        if (inventory == null) return;
+        if (inventory == null)
+            return;
         int maxCap = getMaxStackCapacity(inventory);
         inventory.setMaxStackSize(maxCap);
-        for (int slot : STORAGE_SLOTS) {
-            ItemStack item = inventory.getItem(slot);
-            if (item != null && !item.getType().isAir()) {
-                applyCustomStackSize(item, maxCap);
+        BackpackTier tier = getTierFromInventory(inventory);
+        for (int slot : tier.getStorageSlots()) {
+            if (slot < inventory.getSize()) {
+                ItemStack item = inventory.getItem(slot);
+                if (item != null && !item.getType().isAir()) {
+                    applyCustomStackSize(item, maxCap);
+                }
             }
         }
     }
@@ -556,17 +884,23 @@ public final class BackpackService {
         return containsStatic(MODULE_SLOTS, slot);
     }
 
-    private boolean contains(int[] a, int value) { for (int i : a) if (i == value) return true; return false; }
+    public boolean isModuleSlot(Inventory inventory, int slot) {
+        if (inventory == null)
+            return isModuleSlot(slot);
+        BackpackTier tier = getTierFromInventory(inventory);
+        return tier.isModuleSlot(slot);
+    }
 
-    private static boolean containsStatic(int[] a, int value) {
-        for (int slot : a)
-            if (slot == value)
+    private boolean contains(int[] a, int value) {
+        for (int i : a)
+            if (i == value)
                 return true;
         return false;
     }
 
     public void close(Player player, Inventory inventory) {
-        if (!(inventory.getHolder() instanceof BackpackHolder holder)) return;
+        if (!(inventory.getHolder() instanceof BackpackHolder holder))
+            return;
         UUID storage = storageId(holder.storageId());
         // InventoryCloseEvent and PlayerQuitEvent can both be fired for the
         // same view. Only the current lock owner may release it; an old close
@@ -581,6 +915,18 @@ public final class BackpackService {
     private void saveOpenInventory(UUID owner, UUID storage, BackpackHolder holder, Inventory inventory) {
         if (holder.sourceItem() != null) {
             saveContainer(holder.sourceItem(), inventory);
+            if (owner != null) {
+                Player player = plugin.getServer().getPlayer(owner);
+                if (player != null && player.isOnline() && hasEquippedBackpack(player)) {
+                    ItemStack equipped = getEquippedBackpack(player);
+                    if (equipped != null && isBackpack(equipped)) {
+                        UUID eqId = backpackId(equipped);
+                        if (eqId != null && eqId.equals(storage)) {
+                            setEquippedBackpack(player, holder.sourceItem());
+                        }
+                    }
+                }
+            }
             if (holder.sourceDisplay() != null && holder.sourceDisplay().isValid()) {
                 holder.sourceDisplay().setItemStack(holder.sourceItem());
             }
@@ -629,48 +975,58 @@ public final class BackpackService {
             return;
         }
         File file = file(uuid);
-        if (!file.exists()) return;
+        if (!file.exists())
+            return;
         List<?> items = YamlConfiguration.loadConfiguration(file).getList("items", List.of());
         loadItems(items, inventory);
     }
 
     private void loadItems(List<?> items, Inventory inventory) {
         inventory.setMaxStackSize(512);
-        if (items.size() >= 54) {
-            for (int physical = 0; physical < 54; physical++) {
-                Object obj = items.get(physical);
-                ItemStack stack = obj instanceof ItemStack s ? s : null;
-                if (containsStatic(MODULE_SLOTS, physical)) {
-                    if (stack != null && !stack.getType().isAir() && isModule(stack)) {
-                        inventory.setItem(physical, stack);
-                    } else {
-                        inventory.setItem(physical, createModuleSocketItem());
-                    }
+        int invSize = inventory.getSize();
+        BackpackTier tier = getTierFromInventory(inventory);
+        int[] moduleSlots = tier.getModuleSlots();
+
+        for (int i = 0; i < invSize && i < items.size(); i++) {
+            Object obj = items.get(i);
+            ItemStack stack = obj instanceof ItemStack s ? s : null;
+            if (tier.isModuleSlot(i)) {
+                if (stack != null && !stack.getType().isAir() && isModule(stack)) {
+                    vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inventory, i, stack);
                 } else {
-                    inventory.setItem(physical, stack);
+                    inventory.setItem(i, createModuleSocketItem());
+                }
+            } else {
+                if (stack != null && !stack.getType().isAir()) {
+                    if (isEmptyModuleSocket(stack)) {
+                        stack = null;
+                    }
+                }
+                vn.haohan.backpack.hook.NmsStackHelper.setDirectSlot(inventory, i, stack);
+            }
+        }
+
+        for (int slot : moduleSlots) {
+            if (slot < invSize) {
+                ItemStack cur = inventory.getItem(slot);
+                if (cur == null || cur.getType().isAir()) {
+                    inventory.setItem(slot, createModuleSocketItem());
                 }
             }
-            int cap = getMaxStackCapacity(inventory);
-            inventory.setMaxStackSize(cap);
-            return;
         }
-        for (int i = 0; i < STORAGE_SLOTS.length && i < items.size(); i++)
-            if (items.get(i) instanceof ItemStack stack) inventory.setItem(STORAGE_SLOTS[i], stack);
-        for (int slot : MODULE_SLOTS) {
-            if (inventory.getItem(slot) == null || inventory.getItem(slot).getType().isAir()) {
-                inventory.setItem(slot, createModuleSocketItem());
-            }
-        }
+
         int cap = getMaxStackCapacity(inventory);
         inventory.setMaxStackSize(cap);
-
     }
 
     private void putInFirstStorageSlot(ItemStack stack, Inventory inventory) {
-        for (int slot : STORAGE_SLOTS) {
-            if (inventory.getItem(slot) == null || inventory.getItem(slot).getType().isAir()) {
-                inventory.setItem(slot, stack);
-                return;
+        BackpackTier tier = getTierFromInventory(inventory);
+        for (int slot : tier.getStorageSlots()) {
+            if (slot < inventory.getSize()) {
+                if (inventory.getItem(slot) == null || inventory.getItem(slot).getType().isAir()) {
+                    inventory.setItem(slot, stack);
+                    return;
+                }
             }
         }
     }
@@ -678,50 +1034,72 @@ public final class BackpackService {
     private void save(UUID owner, UUID uuid, Inventory inventory) {
         YamlConfiguration yaml = new YamlConfiguration();
         List<ItemStack> items = new ArrayList<>();
-        for (int physical = 0; physical < 54; physical++) {
+        int invSize = inventory.getSize();
+        BackpackTier tier = getTierFromInventory(inventory);
+
+        for (int physical = 0; physical < invSize; physical++) {
             ItemStack item = inventory.getItem(physical);
-            if (containsStatic(MODULE_SLOTS, physical) && isEmptyModuleSocket(item)) {
+            if (tier.isModuleSlot(physical) && isEmptyModuleSocket(item)) {
                 items.add(null);
             } else if (item != null && !item.getType().isAir()) {
                 ItemStack safe = item.clone();
-                if (safe.getAmount() > 99) safe.setAmount(99);
+                if (safe.getAmount() > 99)
+                    safe.setAmount(99);
                 items.add(safe);
             } else {
                 items.add(null);
             }
         }
         yaml.set("items", items);
-        if (database != null) database.save(uuid, owner, inventory, STORAGE_SLOTS);
+        int[] dynamicStorageSlots = tier.getStorageSlots();
+        if (database != null)
+            database.save(uuid, owner, inventory, dynamicStorageSlots);
         // Retain the legacy YAML as a migration/back-up format.
-        try { yaml.save(file(uuid)); } catch (IOException ex) { plugin.getLogger().warning("Không lưu được ba lô " + uuid + ": " + ex.getMessage()); }
+        try {
+            yaml.save(file(uuid));
+        } catch (IOException ex) {
+            plugin.getLogger().warning("Không lưu được ba lô " + uuid + ": " + ex.getMessage());
+        }
     }
 
-    private File file(UUID uuid) { return new File(dataFolder, uuid + ".yml"); }
+    private File file(UUID uuid) {
+        return new File(dataFolder, uuid + ".yml");
+    }
 
     public boolean isPlacedBackpack(Block block) {
-        return block.getState() instanceof TileState state && state.getPersistentDataContainer().has(placedKey, PersistentDataType.BYTE);
+        return block.getState() instanceof TileState state
+                && state.getPersistentDataContainer().has(placedKey, PersistentDataType.BYTE);
     }
 
     public void markPlacedBackpack(Block block) {
-        if (!(block.getState() instanceof TileState state)) return;
-        state.getPersistentDataContainer().set(placedKey, PersistentDataType.BYTE, (byte) 1); state.update(true, false);
+        if (!(block.getState() instanceof TileState state))
+            return;
+        state.getPersistentDataContainer().set(placedKey, PersistentDataType.BYTE, (byte) 1);
+        state.update(true, false);
     }
 
     public void markPlacedBackpack(Block block, ItemStack item) {
-        if (!(block.getState() instanceof TileState state)) return;
+        if (!(block.getState() instanceof TileState state))
+            return;
         state.getPersistentDataContainer().set(placedKey, PersistentDataType.BYTE, (byte) 1);
         UUID id = backpackId(item);
-        if (id != null) state.getPersistentDataContainer().set(placedIdKey, PersistentDataType.STRING, id.toString());
+        if (id != null)
+            state.getPersistentDataContainer().set(placedIdKey, PersistentDataType.STRING, id.toString());
         copyContainer(item, state);
         state.update(true, false);
     }
 
-    /** Spawn the backpack display and its exact matching interaction entity hitbox directly. */
+    /**
+     * Spawn the backpack display and its exact matching interaction entity hitbox
+     * directly.
+     */
     public void spawnPlacedBackpack(Block block, ItemStack item, float yaw) {
-        if (hasPlacedBackpackAt(block)) return;
+        if (hasPlacedBackpackAt(block))
+            return;
         Location location = block.getLocation();
         UUID id = backpackId(item);
-        if (id == null) id = UUID.randomUUID();
+        if (id == null)
+            id = UUID.randomUUID();
         final UUID placedId = id;
         block.setType(Material.AIR, false);
         UUID visualId = UUID.randomUUID();
@@ -759,23 +1137,27 @@ public final class BackpackService {
      */
     public void spawnPlacedBackpackNextTick(Block block, ItemStack item, float yaw) {
         plugin.getServer().getScheduler().runTask(plugin, () -> {
-            if (block.getType().isAir() && !hasPlacedBackpackAt(block)) spawnPlacedBackpack(block, item, yaw);
+            if (block.getType().isAir() && !hasPlacedBackpackAt(block))
+                spawnPlacedBackpack(block, item, yaw);
         });
     }
 
     /**
      * Returns whether a backpack visual already occupies this block position.
-     * The search box is tightly scoped to the block so vertically or horizontally adjacent backpacks do not conflict.
+     * The search box is tightly scoped to the block so vertically or horizontally
+     * adjacent backpacks do not conflict.
      */
     public boolean hasPlacedBackpackAt(Block block) {
-        if (block == null || block.getWorld() == null) return false;
+        if (block == null || block.getWorld() == null)
+            return false;
         Location center = block.getLocation().add(0.5, 0.3, 0.5);
         return block.getWorld().getNearbyEntities(center, 0.4, 0.25, 0.4).stream()
                 .anyMatch(this::isBackpackVisual);
     }
 
     public boolean isBackpackVisual(Entity entity) {
-        if (entity == null || entity.isDead()) return false;
+        if (entity == null || entity.isDead())
+            return false;
         boolean isVisual = entity.getPersistentDataContainer().has(visualKey, PersistentDataType.BYTE);
         if (isVisual && entity instanceof Interaction interaction) {
             sanitizeInteraction(interaction);
@@ -784,7 +1166,8 @@ public final class BackpackService {
     }
 
     /**
-     * Auto-correct interaction entity position and dimensions if they are offset or oversized.
+     * Auto-correct interaction entity position and dimensions if they are offset or
+     * oversized.
      */
     private void sanitizeInteraction(Interaction interaction) {
         if (Math.abs(interaction.getInteractionWidth() - 0.6f) > 0.01f) {
@@ -802,15 +1185,19 @@ public final class BackpackService {
         }
     }
 
-    public Location backpackVisualLocation(Entity entity) { return entity.getLocation().getBlock().getLocation(); }
+    public Location backpackVisualLocation(Entity entity) {
+        return entity.getLocation().getBlock().getLocation();
+    }
 
     public ItemDisplay backpackVisualDisplay(Entity entity) {
-        if (entity instanceof ItemDisplay display) return display;
+        if (entity instanceof ItemDisplay display)
+            return display;
         String visualId = entity.getPersistentDataContainer().get(visualIdKey, PersistentDataType.STRING);
         if (visualId != null) {
             for (Entity nearby : entity.getNearbyEntities(0.8, 0.8, 0.8)) {
                 if (nearby instanceof ItemDisplay display && isBackpackVisual(display)) {
-                    String nearbyVisualId = display.getPersistentDataContainer().get(visualIdKey, PersistentDataType.STRING);
+                    String nearbyVisualId = display.getPersistentDataContainer().get(visualIdKey,
+                            PersistentDataType.STRING);
                     if (visualId.equals(nearbyVisualId)) {
                         return display;
                     }
@@ -818,7 +1205,8 @@ public final class BackpackService {
             }
         }
         Block block = entity.getLocation().getBlock();
-        for (Entity nearby : entity.getWorld().getNearbyEntities(block.getLocation().add(0.5, 0.3, 0.5), 0.4, 0.4, 0.4)) {
+        for (Entity nearby : entity.getWorld().getNearbyEntities(block.getLocation().add(0.5, 0.3, 0.5), 0.4, 0.4,
+                0.4)) {
             if (nearby instanceof ItemDisplay display && isBackpackVisual(display)) {
                 return display;
             }
@@ -832,11 +1220,13 @@ public final class BackpackService {
     }
 
     public void removeBackpackVisual(Entity entity) {
-        if (entity == null) return;
+        if (entity == null)
+            return;
         String visualId = entity.getPersistentDataContainer().get(visualIdKey, PersistentDataType.STRING);
         if (visualId != null) {
             for (Entity nearby : entity.getNearbyEntities(0.8, 0.8, 0.8)) {
-                if (!isBackpackVisual(nearby)) continue;
+                if (!isBackpackVisual(nearby))
+                    continue;
                 String nearbyVisualId = nearby.getPersistentDataContainer().get(visualIdKey, PersistentDataType.STRING);
                 if (visualId.equals(nearbyVisualId)) {
                     nearby.remove();
@@ -844,7 +1234,8 @@ public final class BackpackService {
             }
         } else {
             Block block = entity.getLocation().getBlock();
-            for (Entity nearby : entity.getWorld().getNearbyEntities(block.getLocation().add(0.5, 0.3, 0.5), 0.4, 0.4, 0.4)) {
+            for (Entity nearby : entity.getWorld().getNearbyEntities(block.getLocation().add(0.5, 0.3, 0.5), 0.4, 0.4,
+                    0.4)) {
                 if (isBackpackVisual(nearby) && nearby != entity) {
                     if (nearby.getClass() != entity.getClass()) {
                         nearby.remove();
@@ -858,12 +1249,14 @@ public final class BackpackService {
     public ItemStack breakBackpackVisual(Entity entity) {
         ItemDisplay display = backpackVisualDisplay(entity);
         ItemStack item = display != null ? display.getItemStack() : null;
-        if (item == null) item = createBackpackItem();
+        if (item == null)
+            item = createBackpackItem();
         item = item.clone();
         item.setAmount(1);
 
         UUID storage = visualStorageId(entity);
-        if (storage == null) storage = backpackId(item);
+        if (storage == null)
+            storage = backpackId(item);
 
         // Fallback for legacy placed backpacks without container NBT:
         if (!hasContainerContents(item) && storage != null) {
@@ -871,7 +1264,8 @@ public final class BackpackService {
             if (!contents.isEmpty()) {
                 Inventory temp = plugin.getServer().createInventory(null, 54);
                 for (ItemStack content : contents) {
-                    if (content != null && !content.getType().isAir()) temp.addItem(content);
+                    if (content != null && !content.getType().isAir())
+                        temp.addItem(content);
                 }
                 saveContainer(item, temp);
             }
@@ -885,20 +1279,31 @@ public final class BackpackService {
 
     private UUID visualStorageId(Entity entity) {
         String value = entity.getPersistentDataContainer().get(placedIdKey, PersistentDataType.STRING);
-        try { return value == null ? null : UUID.fromString(value); }
-        catch (IllegalArgumentException ignored) { return null; }
+        try {
+            return value == null ? null : UUID.fromString(value);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     public UUID placedBackpackId(Block block) {
-        if (!(block.getState() instanceof TileState state)) return null;
+        if (!(block.getState() instanceof TileState state))
+            return null;
         String value = state.getPersistentDataContainer().get(placedIdKey, PersistentDataType.STRING);
-        try { return value == null ? null : UUID.fromString(value); } catch (IllegalArgumentException ex) { return null; }
+        try {
+            return value == null ? null : UUID.fromString(value);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     public ItemStack createBackpackItem(UUID id) {
         ItemStack item = createBackpackItem();
         ItemMeta meta = item.getItemMeta();
-        if (meta != null) { meta.getPersistentDataContainer().set(backpackIdKey, PersistentDataType.STRING, id.toString()); item.setItemMeta(meta); }
+        if (meta != null) {
+            meta.getPersistentDataContainer().set(backpackIdKey, PersistentDataType.STRING, id.toString());
+            item.setItemMeta(meta);
+        }
         return item;
     }
 
@@ -912,7 +1317,8 @@ public final class BackpackService {
         ItemMeta meta = from.getItemMeta();
         if (meta != null) {
             byte[] contents = meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
-            if (contents != null) to.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, contents);
+            if (contents != null)
+                to.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, contents);
         }
     }
 
@@ -920,14 +1326,18 @@ public final class BackpackService {
         ItemMeta meta = to.getItemMeta();
         if (meta != null) {
             byte[] contents = from.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY);
-            if (contents != null) { meta.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, contents); to.setItemMeta(meta); }
+            if (contents != null) {
+                meta.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, contents);
+                to.setItemMeta(meta);
+            }
         }
     }
 
     private void loadContainer(ItemStack item, Inventory inventory) {
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
-            loadSerialized(meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY), inventory);
+            loadSerialized(meta.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY),
+                    inventory);
             updateBackpackLore(meta, inventory);
             item.setItemMeta(meta);
         }
@@ -938,20 +1348,90 @@ public final class BackpackService {
         return meta != null && meta.getPersistentDataContainer().has(contentsKey, PersistentDataType.BYTE_ARRAY);
     }
 
-    private void loadContainer(TileState state, Inventory inventory) { loadSerialized(state.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY), inventory); }
+    private void loadContainer(TileState state, Inventory inventory) {
+        loadSerialized(state.getPersistentDataContainer().get(contentsKey, PersistentDataType.BYTE_ARRAY), inventory);
+    }
 
     private void loadSerialized(byte[] bytes, Inventory inventory) {
-        if (bytes == null) return;
+        if (bytes == null)
+            return;
         List<ItemStack> items = deserializeToItems(bytes);
-        if (!items.isEmpty()) loadItems(items, inventory);
+        if (!items.isEmpty())
+            loadItems(items, inventory);
     }
 
     private void saveContainer(ItemStack item, Inventory inventory) {
         ItemMeta meta = item.getItemMeta();
-        if (meta == null) return;
-        meta.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, serializeInventory(inventory));
+        if (meta == null)
+            return;
+        meta.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY,
+                serializeInventory(inventory));
         updateBackpackLore(meta, inventory);
         item.setItemMeta(meta);
+        applyContainerComponent(item, inventory);
+    }
+
+    public void applyContainerComponent(ItemStack item, Inventory inventory) {
+        if (inventory == null)
+            return;
+        int size = inventory.getSize();
+        List<ItemStack> items = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            items.add(inventory.getItem(i));
+        }
+        applyContainerComponent(item, items);
+    }
+
+    public void applyContainerComponent(ItemStack item, List<ItemStack> items) {
+        if (item == null || item.getType().isAir() || items == null)
+            return;
+        try {
+            Class<?> craftItemStackClass = Class
+                    .forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
+            Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
+            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy",
+                    Class.forName("net.minecraft.world.item.ItemStack"));
+
+            Object nmsStack = asNMSCopy.invoke(null, item);
+            if (nmsStack == null)
+                return;
+
+            Class<?> dataComponentsClass = Class.forName("net.minecraft.core.component.DataComponents");
+            Object containerComponentKey = dataComponentsClass.getField("CONTAINER").get(null);
+
+            Class<?> itemContainerContentsClass = Class
+                    .forName("net.minecraft.world.item.component.ItemContainerContents");
+            Method fromItemsMethod = itemContainerContentsClass.getMethod("fromItems", List.class);
+
+            List<Object> nmsItems = new ArrayList<>(items.size());
+            for (int i = 0; i < items.size(); i++) {
+                ItemStack slotItem = items.get(i);
+                boolean isModuleSocket = (i == items.size() - 1) && isEmptyModuleSocket(slotItem);
+                if (slotItem == null || slotItem.getType().isAir() || isModuleSocket) {
+                    Object emptyNms = asNMSCopy.invoke(null, new ItemStack(Material.AIR));
+                    nmsItems.add(emptyNms);
+                } else {
+                    ItemStack clone = slotItem.clone();
+                    cleanCustomStackSize(clone);
+                    int visualAmount = Math.min(clone.getAmount(), 99);
+                    clone.setAmount(visualAmount);
+                    Object slotNms = asNMSCopy.invoke(null, clone);
+                    nmsItems.add(slotNms);
+                }
+            }
+
+            Object containerContents = fromItemsMethod.invoke(null, nmsItems);
+            Method setMethod = nmsStack.getClass().getMethod("set",
+                    Class.forName("net.minecraft.core.component.DataComponentType"), Object.class);
+            setMethod.invoke(nmsStack, containerComponentKey, containerContents);
+
+            ItemStack result = (ItemStack) asBukkitCopy.invoke(null, nmsStack);
+            if (result != null && result.hasItemMeta()) {
+                item.setItemMeta(result.getItemMeta());
+            }
+        } catch (Throwable ignored) {
+            // NMS fallback
+        }
     }
 
     public static String getClosestDyeColorName(int rgb) {
@@ -995,7 +1475,8 @@ public final class BackpackService {
     }
 
     public void setBackpackColor(ItemStack item, int rgb) {
-        if (item == null || item.getType().isAir()) return;
+        if (item == null || item.getType().isAir())
+            return;
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             meta.getPersistentDataContainer().set(colorKey, PersistentDataType.INTEGER, rgb);
@@ -1010,19 +1491,24 @@ public final class BackpackService {
     }
 
     public Integer getBackpackColor(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return null;
+        if (item == null || !item.hasItemMeta())
+            return null;
         return item.getItemMeta().getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
     }
 
     public void applyDyedColorComponent(ItemStack item, int rgb) {
-        if (item == null || item.getType().isAir()) return;
+        if (item == null || item.getType().isAir())
+            return;
         try {
-            Class<?> craftItemStackClass = Class.forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
+            Class<?> craftItemStackClass = Class
+                    .forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
             Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
-            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy", Class.forName("net.minecraft.world.item.ItemStack"));
+            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy",
+                    Class.forName("net.minecraft.world.item.ItemStack"));
 
             Object nmsStack = asNMSCopy.invoke(null, item);
-            if (nmsStack == null) return;
+            if (nmsStack == null)
+                return;
 
             Class<?> dyedItemColorClass = Class.forName("net.minecraft.world.item.component.DyedItemColor");
             Object dyedColorObj;
@@ -1035,7 +1521,8 @@ public final class BackpackService {
             Class<?> dataComponentsClass = Class.forName("net.minecraft.core.component.DataComponents");
             Object dyedColorComponentKey = dataComponentsClass.getField("DYED_COLOR").get(null);
 
-            Method setMethod = nmsStack.getClass().getMethod("set", Class.forName("net.minecraft.core.component.DataComponentType"), Object.class);
+            Method setMethod = nmsStack.getClass().getMethod("set",
+                    Class.forName("net.minecraft.core.component.DataComponentType"), Object.class);
             setMethod.invoke(nmsStack, dyedColorComponentKey, dyedColorObj);
 
             ItemStack result = (ItemStack) asBukkitCopy.invoke(null, nmsStack);
@@ -1048,19 +1535,24 @@ public final class BackpackService {
     }
 
     public void removeDyedColorComponent(ItemStack item) {
-        if (item == null || item.getType().isAir()) return;
+        if (item == null || item.getType().isAir())
+            return;
         try {
-            Class<?> craftItemStackClass = Class.forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
+            Class<?> craftItemStackClass = Class
+                    .forName(plugin.getServer().getClass().getPackage().getName() + ".inventory.CraftItemStack");
             Method asNMSCopy = craftItemStackClass.getMethod("asNMSCopy", ItemStack.class);
-            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy", Class.forName("net.minecraft.world.item.ItemStack"));
+            Method asBukkitCopy = craftItemStackClass.getMethod("asBukkitCopy",
+                    Class.forName("net.minecraft.world.item.ItemStack"));
 
             Object nmsStack = asNMSCopy.invoke(null, item);
-            if (nmsStack == null) return;
+            if (nmsStack == null)
+                return;
 
             Class<?> dataComponentsClass = Class.forName("net.minecraft.core.component.DataComponents");
             Object dyedColorComponentKey = dataComponentsClass.getField("DYED_COLOR").get(null);
 
-            Method removeMethod = nmsStack.getClass().getMethod("remove", Class.forName("net.minecraft.core.component.DataComponentType"));
+            Method removeMethod = nmsStack.getClass().getMethod("remove",
+                    Class.forName("net.minecraft.core.component.DataComponentType"));
             removeMethod.invoke(nmsStack, dyedColorComponentKey);
 
             ItemStack result = (ItemStack) asBukkitCopy.invoke(null, nmsStack);
@@ -1073,9 +1565,11 @@ public final class BackpackService {
     }
 
     public boolean clearBackpackColor(ItemStack item) {
-        if (item == null || item.getType().isAir()) return false;
+        if (item == null || item.getType().isAir())
+            return false;
         ItemMeta meta = item.getItemMeta();
-        if (meta == null) return false;
+        if (meta == null)
+            return false;
         if (!meta.getPersistentDataContainer().has(colorKey, PersistentDataType.INTEGER)) {
             return false;
         }
@@ -1091,8 +1585,10 @@ public final class BackpackService {
     }
 
     public boolean consumeCauldronLevel(Block block) {
-        if (block.getType() != Material.WATER_CAULDRON) return false;
-        if (!(block.getBlockData() instanceof Levelled levelled)) return false;
+        if (block.getType() != Material.WATER_CAULDRON)
+            return false;
+        if (!(block.getBlockData() instanceof Levelled levelled))
+            return false;
 
         int currentLevel = levelled.getLevel();
         if (currentLevel > 1) {
@@ -1105,23 +1601,29 @@ public final class BackpackService {
         Location loc = block.getLocation().add(0.5, 0.5, 0.5);
         block.getWorld().playSound(loc, Sound.ITEM_BUCKET_EMPTY, 1.0f, 1.2f);
         block.getWorld().playSound(loc, Sound.ENTITY_GENERIC_SPLASH, 0.8f, 1.4f);
-        block.getWorld().spawnParticle(Particle.SPLASH, block.getLocation().add(0.5, 0.75, 0.5), 18, 0.2, 0.1, 0.2, 0.1);
+        block.getWorld().spawnParticle(Particle.SPLASH, block.getLocation().add(0.5, 0.75, 0.5), 18, 0.2, 0.1, 0.2,
+                0.1);
         return true;
     }
 
     public void checkItemInCauldron(org.bukkit.entity.Item itemEntity) {
-        if (itemEntity == null || !itemEntity.isValid() || itemEntity.isDead()) return;
+        if (itemEntity == null || !itemEntity.isValid() || itemEntity.isDead())
+            return;
         ItemStack stack = itemEntity.getItemStack();
-        if (!isBackpack(stack)) return;
-        if (getBackpackColor(stack) == null) return;
+        if (!isBackpack(stack))
+            return;
+        if (getBackpackColor(stack) == null)
+            return;
 
         Block block = itemEntity.getLocation().getBlock();
         if (block.getType() != Material.WATER_CAULDRON) {
             block = itemEntity.getLocation().clone().add(0, -0.1, 0).getBlock();
-            if (block.getType() != Material.WATER_CAULDRON) return;
+            if (block.getType() != Material.WATER_CAULDRON)
+                return;
         }
 
-        if (!consumeCauldronLevel(block)) return;
+        if (!consumeCauldronLevel(block))
+            return;
 
         ItemStack uncolored = stack.clone();
         clearBackpackColor(uncolored);
@@ -1131,7 +1633,8 @@ public final class BackpackService {
     public void checkCauldrons() {
         for (org.bukkit.World world : plugin.getServer().getWorlds()) {
             for (org.bukkit.entity.Item itemEntity : world.getEntitiesByClass(org.bukkit.entity.Item.class)) {
-                if (!itemEntity.isValid() || itemEntity.isDead()) continue;
+                if (!itemEntity.isValid() || itemEntity.isDead())
+                    continue;
                 ItemStack stack = itemEntity.getItemStack();
                 if (isBackpack(stack) && getBackpackColor(stack) != null) {
                     checkItemInCauldron(itemEntity);
@@ -1141,21 +1644,25 @@ public final class BackpackService {
     }
 
     public void updateBackpackLore(ItemMeta meta, Inventory inventory) {
-        if (meta == null) return;
+        if (meta == null)
+            return;
 
+        BackpackTier tier = getBackpackTier(meta);
         int occupiedSlots = 0;
         List<String> itemLines = new ArrayList<>();
 
         int cap = 64;
         if (inventory != null) {
             cap = getMaxStackCapacity(inventory);
-            for (int slot : STORAGE_SLOTS) {
-                ItemStack stack = inventory.getItem(slot);
-                if (stack != null && !stack.getType().isAir()) {
-                    occupiedSlots++;
-                    if (itemLines.size() < 7) {
-                        String name = formatItemStackName(stack);
-                        itemLines.add(" §8• §f" + name + " §7x" + stack.getAmount());
+            for (int slot : tier.getStorageSlots()) {
+                if (slot < inventory.getSize()) {
+                    ItemStack stack = inventory.getItem(slot);
+                    if (stack != null && !stack.getType().isAir()) {
+                        occupiedSlots++;
+                        if (itemLines.size() < 7) {
+                            String name = formatItemStackName(stack);
+                            itemLines.add(" §8• §f" + name + " §7x" + stack.getAmount());
+                        }
                     }
                 }
             }
@@ -1165,10 +1672,11 @@ public final class BackpackService {
             for (int i = 0; i < items.size(); i++) {
                 ItemStack stack = items.get(i);
                 if (stack != null && !stack.getType().isAir()) {
-                    if (containsStatic(MODULE_SLOTS, i) && isModule(stack)) {
+                    if (tier.isModuleSlot(i) && isModule(stack)) {
                         int moduleCap = getModuleStackCapacity(stack);
-                        if (moduleCap > cap) cap = moduleCap;
-                    } else if (!containsStatic(MODULE_SLOTS, i)) {
+                        if (moduleCap > cap)
+                            cap = moduleCap;
+                    } else if (!tier.isModuleSlot(i)) {
                         occupiedSlots++;
                         if (itemLines.size() < 7) {
                             String name = formatItemStackName(stack);
@@ -1180,16 +1688,23 @@ public final class BackpackService {
         }
 
         List<String> lore = new ArrayList<>();
+        lore.add("§7Cấp bậc: " + tier.getDisplayName());
         if (meta.getPersistentDataContainer().has(colorKey, PersistentDataType.INTEGER)) {
             int rgb = meta.getPersistentDataContainer().get(colorKey, PersistentDataType.INTEGER);
-            lore.add("§7Màu sắc: " + getFriendlyDyeName(rgb));
+            lore.add("§7Đã nhuộm: " + getFriendlyDyeName(rgb));
         }
-        lore.add("§7Sức chứa: §e53 slot + 1 module");
+        if (tier.getModuleSlotsCount() > 0) {
+            lore.add("§7Sức chứa: §e" + tier.getStorageSlotsCount() + " slot + " + tier.getModuleSlotsCount()
+                    + " module");
+        } else {
+            lore.add("§7Sức chứa: §e" + tier.getStorageSlotsCount() + " slot");
+        }
         if (cap > 64) {
             lore.add("§7Giới hạn Stack: §e" + cap);
         }
         lore.add("");
-        lore.add("§7─── §fChứa bên trong §8(§e" + occupiedSlots + "§7/§e53§7 slot) §7───");
+        lore.add("§7─── §fChứa bên trong §8(§e" + occupiedSlots + "§7/§e" + tier.getStorageSlotsCount()
+                + "§7 slot) §7───");
 
         if (itemLines.isEmpty()) {
             lore.add(" §8• §7(Trống)");
@@ -1204,7 +1719,8 @@ public final class BackpackService {
     }
 
     public List<ItemStack> deserializeToItems(byte[] bytes) {
-        if (bytes == null || bytes.length == 0) return List.of();
+        if (bytes == null || bytes.length == 0)
+            return List.of();
         try {
             if (bytes.length >= 8) {
                 ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
@@ -1260,8 +1776,14 @@ public final class BackpackService {
     }
 
     private String formatItemStackName(ItemStack stack) {
-        if (stack.hasItemMeta() && stack.getItemMeta().hasDisplayName()) {
-            return stack.getItemMeta().getDisplayName();
+        if (stack.hasItemMeta()) {
+            ItemMeta meta = stack.getItemMeta();
+            if (meta.getPersistentDataContainer().has(origNameKey, PersistentDataType.STRING)) {
+                return meta.getPersistentDataContainer().get(origNameKey, PersistentDataType.STRING);
+            }
+            if (meta.hasDisplayName()) {
+                return meta.getDisplayName().replaceAll(" §e\\(x\\d+\\)$", "").replaceAll(" \\(x\\d+\\)$", "");
+            }
         }
         String name = stack.getType().name().toLowerCase().replace('_', ' ');
         String[] words = name.split(" ");
@@ -1275,20 +1797,24 @@ public final class BackpackService {
     }
 
     private void saveContainer(TileState state, Inventory inventory) {
-        state.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY, serializeInventory(inventory)); state.update(true, false);
+        state.getPersistentDataContainer().set(contentsKey, PersistentDataType.BYTE_ARRAY,
+                serializeInventory(inventory));
+        state.update(true, false);
     }
 
     private byte[] serializeInventory(Inventory inventory) {
         try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-             DataOutputStream dataOut = new DataOutputStream(bytes)) {
+                DataOutputStream dataOut = new DataOutputStream(bytes)) {
             dataOut.writeInt(0x48484250); // Magic 'HHBP'
             dataOut.writeInt(2); // Version 2
-            dataOut.writeInt(54);
+            int size = inventory.getSize();
+            dataOut.writeInt(size);
 
             try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(dataOut)) {
-                for (int physical = 0; physical < 54; physical++) {
+                for (int physical = 0; physical < size; physical++) {
                     ItemStack item = inventory.getItem(physical);
-                    if (item == null || item.getType().isAir() || (containsStatic(MODULE_SLOTS, physical) && isEmptyModuleSocket(item))) {
+                    boolean isModuleSocket = (physical == size - 1) && isEmptyModuleSocket(item);
+                    if (item == null || item.getType().isAir() || isModuleSocket) {
                         dataOut.writeBoolean(false);
                     } else {
                         dataOut.writeBoolean(true);
@@ -1310,15 +1836,21 @@ public final class BackpackService {
     }
 
     private TileState placedState(Inventory inventory) {
-        if (inventory == null || inventory.getLocation() == null) return null;
-        if (!(inventory.getLocation().getBlock().getState() instanceof TileState state)) return null;
+        if (inventory == null || inventory.getLocation() == null)
+            return null;
+        if (!(inventory.getLocation().getBlock().getState() instanceof TileState state))
+            return null;
         return isPlacedBackpack(inventory.getLocation().getBlock()) ? state : null;
     }
 
-    public boolean isPlacedBackpackInventory(Inventory inventory) { return placedState(inventory) != null; }
+    public boolean isPlacedBackpackInventory(Inventory inventory) {
+        return placedState(inventory) != null;
+    }
 
     public ItemStack addToPlacedBackpack(Inventory inventory, ItemStack item) {
-        TileState state = placedState(inventory); if (state == null || item == null) return item;
+        TileState state = placedState(inventory);
+        if (state == null || item == null)
+            return item;
         Inventory temp = plugin.getServer().createInventory(null, 54);
         loadContainer(state, temp);
         Map<Integer, ItemStack> leftovers = temp.addItem(item.clone());
@@ -1327,15 +1859,17 @@ public final class BackpackService {
     }
 
     public ItemStack removeFromPlacedBackpack(Inventory inventory, ItemStack requested) {
-        TileState state = placedState(inventory); if (state == null || requested == null) return null;
+        TileState state = placedState(inventory);
+        if (state == null || requested == null)
+            return null;
         Inventory temp = plugin.getServer().createInventory(null, 54);
-     
 
         ItemStack wanted = requested.clone();
         int before = wanted.getAmount();
         int remaining = temp.removeItem(wanted).values().stream().mapToInt(ItemStack::getAmount).sum();
         int removed = before - remaining;
-        if (removed <= 0) return null;
+        if (removed <= 0)
+            return null;
         saveContainer(state, temp);
         wanted.setAmount(removed);
         return wanted;
@@ -1343,14 +1877,19 @@ public final class BackpackService {
 
     public List<ItemStack> removePlacedContents(Location location) {
         UUID storage = UUID.nameUUIDFromBytes(storageKey(location).getBytes(StandardCharsets.UTF_8));
-        List<ItemStack> contents = new ArrayList<>(); File file = file(storage);
-        if (database != null) contents.addAll(database.load(storage));
+        List<ItemStack> contents = new ArrayList<>();
+        File file = file(storage);
+        if (database != null)
+            contents.addAll(database.load(storage));
         if (contents.isEmpty() && file.exists()) {
             List<?> items = YamlConfiguration.loadConfiguration(file).getList("items", List.of());
-            for (Object item : items) if (item instanceof ItemStack stack && !stack.getType().isAir()) contents.add(stack);
+            for (Object item : items)
+                if (item instanceof ItemStack stack && !stack.getType().isAir())
+                    contents.add(stack);
             file.delete();
         }
-        if (database != null) database.delete(storage);
+        if (database != null)
+            database.delete(storage);
         return contents;
     }
 
@@ -1361,7 +1900,8 @@ public final class BackpackService {
 
     public ItemStack createPlacedBackpackItem(Block block) {
         UUID id = placedBackpackId(block);
-        if (!(block.getState() instanceof TileState state)) return id == null ? createBackpackItem() : createBackpackItem(id);
+        if (!(block.getState() instanceof TileState state))
+            return id == null ? createBackpackItem() : createBackpackItem(id);
         ItemStack item = id == null ? createBackpackItem() : createBackpackItem(id);
         copyContainer(state, item);
         return item;
@@ -1369,73 +1909,154 @@ public final class BackpackService {
 
     private List<ItemStack> removeContents(UUID storage) {
         List<ItemStack> contents = new ArrayList<>();
-     
 
         databaseDelete(storage);
 
-        File file = file(storage); if (file.exists()) file.delete();
+        File file = file(storage);
+        if (file.exists())
+            file.delete();
 
         return contents;
     }
 
-    private void databaseDelete(UUID storage) { if (database != null) database.delete(storage); }
-
-    private String storageKey(Location location) {
-        return location.getWorld().getUID() + ":" + location.getBlockX() + ":" + location.getBlockY() + ":" + location.getBlockZ();
+    private void databaseDelete(UUID storage) {
+        if (database != null)
+            database.delete(storage);
     }
 
-    private UUID storageId(String value) { try { return UUID.fromString(value); } catch (IllegalArgumentException ex) { return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)); } }
+    private String storageKey(Location location) {
+        return location.getWorld().getUID() + ":" + location.getBlockX() + ":" + location.getBlockY() + ":"
+                + location.getBlockZ();
+    }
 
-    private String color(String text) { return ChatColor.translateAlternateColorCodes('&', text); }
+    private UUID storageId(String value) {
+        try {
+            return UUID.fromString(value);
+        } catch (IllegalArgumentException ex) {
+            return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8));
+        }
+    }
 
-    private Component component(String text) { return LegacyComponentSerializer.legacyAmpersand().deserialize(text); }
+    private String color(String text) {
+        return ChatColor.translateAlternateColorCodes('&', text);
+    }
+
+    private Component component(String text) {
+        return LegacyComponentSerializer.legacyAmpersand().deserialize(text);
+    }
+
+    public NamespacedKey wornKey() {
+        return wornKey;
+    }
+
+    private final Map<UUID, ItemDisplay> wornDisplays = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public void tickWornBackpacks() {
+        if (!plugin.getConfig().getBoolean("worn-backpack.enabled", true)) {
+            if (!wornDisplays.isEmpty()) {
+                wornDisplays.values().forEach(Entity::remove);
+                wornDisplays.clear();
+            }
+            return;
+        }
+
+        double backOffset = plugin.getConfig().getDouble("worn-backpack.offset.back", 0.26);
+        double heightOffset = plugin.getConfig().getDouble("worn-backpack.offset.height", 0.60);
+        double sneakHeight = plugin.getConfig().getDouble("worn-backpack.offset.sneak-height", 0.55);
+
+        for (Player player : plugin.getServer().getOnlinePlayers()) {
+            if (!player.isValid() || player.isDead()) {
+                ItemDisplay d = wornDisplays.remove(player.getUniqueId());
+                if (d != null)
+                    d.remove();
+                continue;
+            }
+
+            ItemStack worn = getWornOrEquippedBackpack(player);
+            UUID pid = player.getUniqueId();
+            if (worn != null && isBackpack(worn)) {
+                ItemDisplay display = wornDisplays.get(pid);
+                if (display == null || !display.isValid() || display.getVehicle() != player) {
+                    if (display != null)
+                        display.remove();
+                    display = player.getWorld().spawn(player.getLocation(), ItemDisplay.class, ent -> {
+                        ent.setItemStack(worn.clone());
+                        ent.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+                        ent.setPersistent(false);
+                        ent.setTeleportDuration(1);
+                        ent.setInterpolationDuration(1);
+                        ent.getPersistentDataContainer().set(wornKey, PersistentDataType.BYTE, (byte) 1);
+                    });
+                    player.addPassenger(display);
+                    wornDisplays.put(pid, display);
+                } else {
+                    display.setItemStack(worn.clone());
+                }
+
+                float headYaw = player.getLocation().getYaw();
+                float bodyYaw = getPlayerBodyYaw(player);
+                float headPitch = player.getLocation().getPitch();
+
+                // Shortest angular difference between head and body
+                float diffYaw = ((headYaw - bodyYaw + 540.0f) % 360.0f) - 180.0f;
+                float clampedDiff = Math.max(-50.0f, Math.min(50.0f, diffYaw));
+
+                // Dynamic smooth blended yaw (torso follows body + flexes towards head)
+                float blendedYaw = bodyYaw + (clampedDiff * 0.40f);
+
+                // Pitch: Sneak bend + subtle look up/down flex
+                float basePitch = player.isSneaking() ? 15.0f : 0.0f;
+                float blendedPitch = basePitch + (headPitch * 0.12f);
+
+                display.setRotation(blendedYaw + 180.0f, -blendedPitch);
+
+                float back = (float) backOffset;
+                float height = (float) (player.isSneaking() ? (sneakHeight - 1.45) : (heightOffset - 1.45));
+
+                org.joml.Vector3f translation = new org.joml.Vector3f(0.0f, height, back);
+                org.joml.Quaternionf rotation = new org.joml.Quaternionf()
+                        .rotateX((float) Math.toRadians(blendedPitch));
+                org.joml.Vector3f scale = new org.joml.Vector3f(1.0f, 1.0f, 1.0f);
+
+                org.bukkit.util.Transformation trans = new org.bukkit.util.Transformation(
+                        translation,
+                        rotation,
+                        scale,
+                        new org.joml.Quaternionf());
+                display.setTransformation(trans);
+            } else {
+                ItemDisplay d = wornDisplays.remove(pid);
+                if (d != null)
+                    d.remove();
+            }
+        }
+    }
 
     public void updateWornBackpack(Player player) {
-        if (player == null || !player.isOnline()) return;
-        ItemStack chest = player.getInventory().getChestplate();
-        if (isBackpack(chest)) {
-            ItemDisplay display = getWornBackpackDisplay(player);
-            if (display == null || !display.isValid()) {
-                removeWornBackpack(player);
-                display = player.getWorld().spawn(player.getLocation(), ItemDisplay.class, ent -> {
-                    ent.setItemStack(chest.clone());
-                    ent.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.HEAD);
-                    ent.setPersistent(false);
-                    ent.getPersistentDataContainer().set(wornKey, PersistentDataType.BYTE, (byte) 1);
-
-                    Transformation transformation = new Transformation(
-                            new Vector3f(0.0f, -0.35f, -0.25f),
-                            new Quaternionf().rotateY((float) Math.PI),
-                            new Vector3f(0.6f, 0.6f, 0.6f),
-                            new Quaternionf()
-                    );
-                    ent.setTransformation(transformation);
-                });
-                player.addPassenger(display);
-            } else {
-                display.setItemStack(chest.clone());
-            }
-        } else {
+        if (player == null || !player.isOnline())
+            return;
+        ItemStack worn = getWornOrEquippedBackpack(player);
+        UUID pid = player.getUniqueId();
+        if (worn == null || !isBackpack(worn)) {
+            ItemDisplay d = wornDisplays.remove(pid);
+            if (d != null)
+                d.remove();
             removeWornBackpack(player);
         }
     }
 
-    public ItemDisplay getWornBackpackDisplay(Player player) {
-        if (player == null) return null;
-        for (Entity passenger : player.getPassengers()) {
-            if (passenger instanceof ItemDisplay display && isWornBackpack(display)) {
-                return display;
-            }
-        }
-        return null;
-    }
-
     public boolean isWornBackpack(Entity entity) {
-        return entity != null && entity.isValid() && entity.getPersistentDataContainer().has(wornKey, PersistentDataType.BYTE);
+        return entity != null && entity.isValid()
+                && entity.getPersistentDataContainer().has(wornKey, PersistentDataType.BYTE);
     }
 
     public void removeWornBackpack(Player player) {
-        if (player == null) return;
+        if (player == null)
+            return;
+        ItemDisplay d = wornDisplays.remove(player.getUniqueId());
+        if (d != null) {
+            d.remove();
+        }
         for (Entity passenger : new ArrayList<>(player.getPassengers())) {
             if (isWornBackpack(passenger)) {
                 player.removePassenger(passenger);
@@ -1443,11 +2064,16 @@ public final class BackpackService {
             }
         }
         if (player.getWorld() != null) {
-            for (Entity nearby : player.getWorld().getNearbyEntities(player.getLocation(), 2.0, 2.0, 2.0)) {
-                if (nearby instanceof ItemDisplay && isWornBackpack(nearby) && nearby.getPassengers().isEmpty() && !player.getPassengers().contains(nearby)) {
+            for (Entity nearby : player.getWorld().getNearbyEntities(player.getLocation(), 3.0, 3.0, 3.0)) {
+                if ((nearby instanceof ArmorStand || nearby instanceof ItemDisplay) && isWornBackpack(nearby)) {
                     nearby.remove();
                 }
             }
         }
+    }
+
+    public void removeAllWornBackpacks() {
+        wornDisplays.values().forEach(Entity::remove);
+        wornDisplays.clear();
     }
 }

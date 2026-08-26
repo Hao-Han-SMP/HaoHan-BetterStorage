@@ -4,6 +4,13 @@ custom-gui:
   font: 'haohan:gui'
   prefix: ''
   glyph: ''
+  glyphs:
+    1: ''
+    2: ''
+    3: ''
+    4: ''
+    5: ''
+    6: ''
 rows: 6
 backpack-item-name: 'Backpack'
 backpack-item-model: 'haohan:backpack'
@@ -23,3 +30,11 @@ hopper:
   enabled: true
 backpack-collision:
   enabled: true
+worn-backpack:
+  enabled: true
+  offset:
+    back: 0.26 # Khoảng cách lùi ra sau lưng (block)
+    height: 0.75 # Độ cao vị trí đeo sau lưng khi đứng (block)
+    sneak-height: 0.70 # Độ cao vị trí đeo sau lưng khi ngồi Shift (block)
+
+

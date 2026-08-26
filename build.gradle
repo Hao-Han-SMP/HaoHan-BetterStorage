@@ -31,3 +31,8 @@ processResources {
 }
 
 jar { archiveBaseName = project.name }
+
+tasks.register('generateResourcePack', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath + sourceSets.main.compileClasspath
+    mainClass = 'vn.haohan.backpack.util.ResourcePackRunner'
+}
