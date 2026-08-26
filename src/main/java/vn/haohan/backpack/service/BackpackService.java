@@ -1054,13 +1054,23 @@ public final class BackpackService {
                     org.bukkit.util.Vector pull = dir.normalize().multiply(speed);
                     itemEntity.setVelocity(pull);
 
-                    if (particles && (player.getTicksLived() % 4 == 0)) {
+                    if (particles) {
+                        Location iLoc = itemLoc.clone().add(0, 0.2, 0);
                         player.getWorld().spawnParticle(
                                 Particle.DUST,
-                                itemLoc.clone().add(0, 0.2, 0),
-                                1, 0.05, 0.05, 0.05, 0.0,
-                                new Particle.DustOptions(Color.fromRGB(220, 20, 60), 0.6f)
+                                iLoc,
+                                2, 0.08, 0.08, 0.08, 0.0,
+                                new Particle.DustOptions(Color.fromRGB(255, 30, 30), 0.85f)
                         );
+                        if (dist > 0.6) {
+                            org.bukkit.util.Vector step = dir.clone().normalize().multiply(0.3);
+                            player.getWorld().spawnParticle(
+                                    Particle.DUST,
+                                    iLoc.add(step),
+                                    1, 0.02, 0.02, 0.02, 0.0,
+                                    new Particle.DustOptions(Color.fromRGB(255, 75, 75), 0.65f)
+                            );
+                        }
                     }
                 }
             }
@@ -3154,6 +3164,17 @@ public final class BackpackService {
                     int furnaceTier = getHighestFurnaceTier(worn);
                     if (furnaceTier >= 0) {
                         processFurnaceItemStack(id, worn, player, furnaceTier, particles, sound);
+                    }
+                }
+            }
+            for (ItemStack item : player.getInventory().getContents()) {
+                if (item != null && isBackpack(item) && !item.equals(worn)) {
+                    UUID id = backpackId(item);
+                    if (id != null && !open.containsKey(id)) {
+                        int furnaceTier = getHighestFurnaceTier(item);
+                        if (furnaceTier >= 0) {
+                            processFurnaceItemStack(id, item, player, furnaceTier, particles, sound);
+                        }
                     }
                 }
             }
