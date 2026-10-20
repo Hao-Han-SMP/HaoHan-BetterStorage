@@ -13,7 +13,7 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:${property('paperVersion')}")
-    compileOnly('com.github.Hao-Han-SMP:HaoHanItemCore:a79343279c8aa26749fb05ce5cbef10c430361ac')
+    compileOnly('com.github.Hao-Han-SMP:HaoHanItemCore:v1.0.0')
     compileOnly('org.xerial:sqlite-jdbc:3.53.2.0')
 }
 
